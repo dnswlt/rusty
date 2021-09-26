@@ -1,9 +1,16 @@
 use clap::{value_t, App, Arg};
 use std::io;
 use std::net::{Ipv4Addr, UdpSocket};
+use std::time::Duration;
 
 const IPV4_MULTICAST_ADDR: &'static str = "224.0.0.199";
 const IPV4_MULTICAST_PORT: u16 = 10199;
+const BUF_SIZE: usize = 1024;
+
+enum Message {
+    Dsco,
+    Helo { ip_addr: Ipv4Addr },
+}
 
 fn main() -> io::Result<()> {
     let matches = App::new("multicast")
@@ -38,11 +45,23 @@ fn main() -> io::Result<()> {
     let _server_addr: Ipv4Addr = host.parse().expect("Invalid server address.");
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, IPV4_MULTICAST_PORT))?;
     socket.join_multicast_v4(&multicast_addr, &Ipv4Addr::UNSPECIFIED)?;
-    // Type of buf will be resolved to [u8; 32] later on through usage.
-    let mut buf = [0; 1024];
+    socket.set_read_timeout(Some(Duration::from_millis(1000)))?;
+    // Type of buf will be resolved to u8 later on through usage.
+    let mut buf = [0; BUF_SIZE];
+    socket.send_to(&buf, (multicast_addr, IPV4_MULTICAST_PORT))?;
     loop {
-        let (n_bytes, src_addr) = socket.recv_from(&mut buf)?;
-        println!("Received {} bytes from {}", n_bytes, src_addr);
+        match socket.recv_from(&mut buf) {
+            Ok((n_bytes, src_addr)) => {
+                println!("Received {} bytes from {}", n_bytes, src_addr);
+            }
+            Err(e) => {
+                if let io::ErrorKind::WouldBlock = e.kind() {
+                    // Timeouts are OK.
+                } else {
+                    return Err(e);
+                }
+            }
+        }
     }
-     // Ok(())
+    // Ok(())
 }
