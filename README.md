@@ -1,0 +1,2 @@
+# rusty
+Random Rust hacks.
