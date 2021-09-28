@@ -1,4 +1,4 @@
-use clap::{App, Arg};
+use clap::{value_t, App, Arg};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::net::{Ipv4Addr, UdpSocket};
@@ -41,32 +41,35 @@ fn server(multicast_addr: Ipv4Addr, multicast_port: u16) -> io::Result<()> {
     }
 }
 
-fn client(multicast_addr: Ipv4Addr, multicast_port: u16) -> io::Result<()> {
+fn client(multicast_addr: Ipv4Addr, multicast_port: u16, limit: i32) -> io::Result<()> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     let dsco_msg = bincode::serialize(&Message::Discover).expect("Cannot serialize Message.");
     socket.set_read_timeout(Some(Duration::from_millis(2000)))?;
-    socket.send_to(&dsco_msg, (multicast_addr, multicast_port))?;
-    loop {
-        let mut buf = [0; BUF_SIZE];
-        match socket.recv_from(&mut buf) {
-            Ok((_, src_addr)) => match bincode::deserialize(&buf) {
-                Ok(Message::Hello) => {
-                    println!("Received reply from {}", src_addr);
-                }
-                _ => {
-                    println!("Ignoring invalid message.");
-                }
-            },
-            Err(e) => match e.kind() {
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
-                    return Ok(());
-                }
-                _ => {
-                    return Err(e);
-                }
-            },
+    for _ in 0..limit {
+        socket.send_to(&dsco_msg, (multicast_addr, multicast_port))?;
+        loop {
+            let mut buf = [0; BUF_SIZE];
+            match socket.recv_from(&mut buf) {
+                Ok((_, src_addr)) => match bincode::deserialize(&buf) {
+                    Ok(Message::Hello) => {
+                        println!("Received reply from {}", src_addr);
+                    }
+                    _ => {
+                        println!("Ignoring invalid message.");
+                    }
+                },
+                Err(e) => match e.kind() {
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+                        break;
+                    }
+                    _ => {
+                        return Err(e);
+                    }
+                },
+            }
         }
     }
+    Ok(())
 }
 
 fn main() -> io::Result<()> {
@@ -80,6 +83,13 @@ fn main() -> io::Result<()> {
                 .long("server")
                 .help("Run in server mode."),
         )
+        .arg(
+            Arg::with_name("limit")
+                .short("n")
+                .long("limit")
+                .default_value("1")
+                .help("Number of discovery messages to send as client."),
+        )
         .get_matches();
     let multicast_addr: Ipv4Addr = IPV4_MULTICAST_ADDR
         .parse()
@@ -87,6 +97,7 @@ fn main() -> io::Result<()> {
     if matches.is_present("server_mode") {
         server(multicast_addr, IPV4_MULTICAST_PORT)
     } else {
-        client(multicast_addr, IPV4_MULTICAST_PORT)
+        let limit = value_t!(matches.value_of("limit"), i32).unwrap_or_else(|e| e.exit());
+        client(multicast_addr, IPV4_MULTICAST_PORT, limit)
     }
 }
