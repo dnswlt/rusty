@@ -45,9 +45,7 @@ fn client(multicast_addr: Ipv4Addr, multicast_port: u16) -> io::Result<()> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     let dsco_msg = bincode::serialize(&Message::Discover).expect("Cannot serialize Message.");
     socket.set_read_timeout(Some(Duration::from_millis(2000)))?;
-    for i in 0..10 {
-        socket.send_to(&dsco_msg, (multicast_addr, multicast_port))?;
-    }
+    socket.send_to(&dsco_msg, (multicast_addr, multicast_port))?;
     loop {
         let mut buf = [0; BUF_SIZE];
         match socket.recv_from(&mut buf) {
