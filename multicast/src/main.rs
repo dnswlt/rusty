@@ -57,13 +57,14 @@ fn client(multicast_addr: Ipv4Addr, multicast_port: u16) -> io::Result<()> {
                     println!("Ignoring invalid message.");
                 }
             },
-            Err(e) => {
-                if let io::ErrorKind::WouldBlock = e.kind() {
+            Err(e) => match e.kind() {
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
                     return Ok(());
-                } else {
+                }
+                _ => {
                     return Err(e);
                 }
-            }
+            },
         }
     }
 }
