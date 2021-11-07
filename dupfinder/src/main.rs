@@ -1,21 +1,48 @@
 use clap::{App, Arg};
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path;
 
-fn collect_files(dir: &path::Path, files: &mut Vec<String>) -> io::Result<()> {
+struct FileInfo {
+    path: String,
+    size: u64,
+}
+
+fn collect_files(dir: &path::Path, files: &mut Vec<FileInfo>) -> io::Result<()> {
     if dir.is_dir() {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
             if path.is_file() {
-                files.push(String::from(path.to_string_lossy()));
+                files.push(FileInfo {
+                    path: String::from(path.to_string_lossy()),
+                    size: entry.metadata()?.len(),
+                });
             } else if path.is_dir() {
                 collect_files(&path, files)?;
             }
         }
     }
     return Ok(());
+}
+
+fn group_duplicates(file_infos: &[FileInfo]) -> Vec<Vec<&FileInfo>> {
+    let mut groups: HashMap<u64, Vec<&FileInfo>> = HashMap::new();
+    for file_info in file_infos {
+        if let Some(group) = groups.get_mut(&file_info.size) {
+            group.push(file_info);
+        } else {
+            groups.insert(file_info.size, vec![file_info]);
+        }
+    }
+    let mut result = Vec::new();
+    for (_, group) in groups.drain() {
+        if group.len() > 1 {
+            result.push(group)
+        }
+    }
+    return result;
 }
 
 fn main() -> io::Result<()> {
@@ -28,23 +55,33 @@ fn main() -> io::Result<()> {
     let paths = matches
         .values_of("paths")
         .expect("paths are a required argument");
-    let mut files: Vec<String> = Vec::new();
+    let mut file_infos: Vec<FileInfo> = Vec::new();
     println!("Received {} args.", paths.len());
     for path in paths {
         match fs::metadata(path) {
-            Ok(attr) if attr.is_file() => {
-                println!("{} is a file", path);
-                files.push(String::from(path));
+            Ok(attr) => {
+                if attr.is_file() {
+                    file_infos.push(FileInfo {
+                        path: String::from(path),
+                        size: attr.len(),
+                    });
+                } else if attr.is_dir() {
+                    collect_files(path::Path::new(path), &mut file_infos)?;
+                } else {
+                    eprintln!("Ignoring {}: neither file nor directory", path);
+                }
             }
-            Ok(attr) if attr.is_dir() => {
-                println!("{} is a directory", path);
-                // let dir_contents = ;
-                collect_files(path::Path::new(path), &mut files)?;
-            }
-            Ok(_) => println!("Ignoring {}: neither file nor directory", path),
-            Err(e) => println!("Ignoring {}: {}", path, e),
+            Err(e) => eprintln!("Ignoring {}: {}", path, e),
         }
     }
-    println!("Found {} files.", files.len());
+    println!("Found {} files.", file_infos.len());
+    let dup_groups = group_duplicates(&file_infos);
+    println!("Found {} duplicate groups.", dup_groups.len());
+    for group in dup_groups {
+        for file_info in group {
+            println!("{}", file_info.path);
+        }
+        println!();
+    }
     return io::Result::Ok(());
 }
