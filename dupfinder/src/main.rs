@@ -1,9 +1,9 @@
 use clap::{value_t, App, Arg};
-// use sha2::{Digest, Sha256};
 use ring::digest::{Context, SHA256};
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
+use std::hash::Hash;
 use std::io;
 use std::io::prelude::*;
 use std::path;
@@ -23,27 +23,117 @@ fn collect_files(
     files: &mut Vec<FileInfo>,
     run_opts: &RunOptions,
 ) -> io::Result<()> {
-    if dir.is_dir() {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_file() {
-                let md = entry.metadata()?;
-                if md.len() >= run_opts.min_size {
-                    files.push(FileInfo {
-                        path: path,
-                        size: md.len(),
-                    });
-                }
-            } else if path.is_dir() {
-                collect_files(&path, files, run_opts)?;
+    if !dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Not a directory: {}", dir.to_string_lossy()),
+        ));
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            let md = entry.metadata()?;
+            if md.len() >= run_opts.min_size {
+                files.push(FileInfo {
+                    path: path,
+                    size: md.len(),
+                });
             }
+        } else if path.is_dir() {
+            collect_files(&path, files, run_opts)?;
         }
     }
     return Ok(());
 }
 
+type FileInfoKeyFn<T> = fn(&FileInfo) -> io::Result<T>;
+
+fn non_singleton_groups_by<'a, T: Eq + Hash>(
+    file_infos: &[&'a FileInfo],
+    key_fn: FileInfoKeyFn<T>,
+) -> io::Result<Vec<Vec<&'a FileInfo>>> {
+    let mut groups: HashMap<T, Vec<&FileInfo>> = HashMap::new();
+    for file_info in file_infos {
+        let key = key_fn(file_info)?;
+        if let Some(group) = groups.get_mut(&key) {
+            group.push(file_info);
+        } else {
+            groups.insert(key, vec![file_info]);
+        }
+    }
+    let mut result = Vec::new();
+    for (_, group) in groups {
+        if group.len() > 1 {
+            result.push(group);
+        }
+    }
+    return Ok(result);
+}
+
+fn file_fp(file_info: &FileInfo) -> io::Result<Vec<u8>> {
+    const FP_SIZE: u64 = 1024;
+    let mut f_in = File::open(&file_info.path)?;
+    if file_info.size > 2 * FP_SIZE {
+        f_in.seek(io::SeekFrom::Start(file_info.size / 2))?;
+    }
+    let mut buf = vec![0; FP_SIZE as usize];
+    f_in.read(&mut buf)?;
+    return Ok(buf);
+}
+
+fn file_sha256(file_info: &FileInfo) -> io::Result<[u8; 32]> {
+    const CHUNK_SIZE: usize = 1024;
+    let mut context = Context::new(&SHA256);
+    let mut f_in = File::open(&file_info.path)?;
+    let mut buf: [u8; CHUNK_SIZE] = [0; CHUNK_SIZE];
+    loop {
+        let num_read = f_in.read(&mut buf)?;
+        if num_read == 0 {
+            break;
+        } else {
+            context.update(&buf[..num_read]);
+        }
+    }
+    return Ok(context
+        .finish()
+        .as_ref()
+        .try_into()
+        .expect("Unexpected digest size"));
+}
+
 fn group_duplicates<'a>(
+    file_infos: &'a [FileInfo],
+    run_opts: &RunOptions,
+) -> io::Result<Vec<Vec<&'a FileInfo>>> {
+    let fi: Vec<&'a FileInfo> = file_infos.iter().collect();
+    let by_size = non_singleton_groups_by(&fi, |f| Ok(f.size))?;
+    let mut num_by_size = 0;
+    let mut by_fp = Vec::new();
+    for group in by_size {
+        num_by_size += group.len();
+        by_fp.extend(non_singleton_groups_by(&group, file_fp)?);
+    }
+    let mut num_by_fp = 0;
+    let mut by_hash = Vec::new();
+    for group in by_fp {
+        num_by_fp += group.len();
+        by_hash.extend(non_singleton_groups_by(&group, file_sha256)?);
+    }
+    let mut num_by_hash = 0;
+    for group in &by_hash {
+        num_by_hash += group.len();
+    }
+    if run_opts.verbose {
+        println!(
+            "Duplicates\n\tby_size: {}\n\tby_fp:{}\n\tby_sha256:{}",
+            num_by_size, num_by_fp, num_by_hash
+        );
+    }
+    return Ok(by_hash);
+}
+
+fn _group_duplicates<'a>(
     file_infos: &'a [FileInfo],
     run_opts: &RunOptions,
 ) -> io::Result<Vec<Vec<&'a FileInfo>>> {
@@ -155,7 +245,6 @@ fn main() -> io::Result<()> {
     let run_opts = RunOptions {
         verbose: verbose,
         min_size: min_size,
-        extensions: None,
     };
     let mut file_infos: Vec<FileInfo> = Vec::new();
     for path in paths {
