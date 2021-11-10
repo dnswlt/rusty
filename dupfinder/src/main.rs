@@ -7,6 +7,7 @@ use std::hash::Hash;
 use std::io;
 use std::io::prelude::*;
 use std::path;
+use itertools::Itertools;
 
 struct FileInfo {
     path: path::PathBuf,
@@ -17,6 +18,7 @@ struct RunOptions {
     verbose: bool,
     min_size: u64,
     quick_scan: bool,
+    fp_bytes: usize,
 }
 
 fn collect_files(
@@ -48,12 +50,13 @@ fn collect_files(
     return Ok(());
 }
 
-type FileInfoKeyFn<T> = fn(&FileInfo) -> io::Result<T>;
-
-fn non_singleton_groups_by<'a, T: Eq + Hash>(
+fn non_singleton_groups_by<'a, KeyFn, T: Eq + Hash>(
     file_infos: &[&'a FileInfo],
-    key_fn: FileInfoKeyFn<T>,
-) -> io::Result<Vec<Vec<&'a FileInfo>>> {
+    key_fn: KeyFn,
+) -> io::Result<Vec<Vec<&'a FileInfo>>>
+where
+    KeyFn: Fn(&FileInfo) -> io::Result<T>,
+{
     let mut groups: HashMap<T, Vec<&FileInfo>> = HashMap::new();
     for file_info in file_infos {
         let key = key_fn(file_info)?;
@@ -72,19 +75,18 @@ fn non_singleton_groups_by<'a, T: Eq + Hash>(
     return Ok(result);
 }
 
-fn file_fp(file_info: &FileInfo) -> io::Result<Vec<u8>> {
-    const FP_SIZE: u64 = 1024;
+fn file_fp(file_info: &FileInfo, fp_size: usize) -> io::Result<Vec<u8>> {
     let mut f_in = File::open(&file_info.path)?;
-    if file_info.size > 2 * FP_SIZE {
+    if file_info.size > 2 * fp_size as u64 {
         f_in.seek(io::SeekFrom::Start(file_info.size / 2))?;
     }
-    let mut buf = vec![0; FP_SIZE as usize];
+    let mut buf = vec![0; fp_size];
     f_in.read(&mut buf)?;
     return Ok(buf);
 }
 
 fn file_sha256(file_info: &FileInfo) -> io::Result<[u8; 32]> {
-    const CHUNK_SIZE: usize = 1024;
+    const CHUNK_SIZE: usize = 100 * 1024;
     let mut context = Context::new(&SHA256);
     let mut f_in = File::open(&file_info.path)?;
     let mut buf: [u8; CHUNK_SIZE] = [0; CHUNK_SIZE];
@@ -115,7 +117,9 @@ fn group_duplicates<'a>(
     }
     let mut by_fp = Vec::new();
     for group in by_size {
-        by_fp.extend(non_singleton_groups_by(&group, file_fp)?);
+        by_fp.extend(non_singleton_groups_by(&group, |g| {
+            file_fp(g, run_opts.fp_bytes)
+        })?);
     }
     if run_opts.verbose {
         let size: usize = by_fp.iter().map(|g| g.len()).sum();
@@ -126,12 +130,26 @@ fn group_duplicates<'a>(
         return Ok(by_fp);
     }
     let mut by_hash = Vec::new();
+    let mut fp_misses = 0;
     for group in by_fp {
-        by_hash.extend(non_singleton_groups_by(&group, file_sha256)?);
+        let hash_groups = non_singleton_groups_by(&group, file_sha256)?;
+        if hash_groups.len() != 1 || group.len() != hash_groups[0].len() {
+            fp_misses += 1;
+            if run_opts.verbose {
+                println!(
+                    "SHA256 differs from fingerprint result: {}",
+                    group.iter().map(|f| f.path.to_string_lossy()).format(", ")
+                );
+            }
+        }
+        by_hash.extend(hash_groups);
     }
     if run_opts.verbose {
         let size: usize = by_hash.iter().map(|g| g.len()).sum();
-        println!("Duplicates by sha256: {}", size);
+        println!(
+            "Duplicates by sha256: {} ({} corrections to fingerprint)",
+            size, fp_misses
+        );
     }
     return Ok(by_hash);
 }
@@ -151,6 +169,14 @@ fn main() -> io::Result<()> {
                 .takes_value(true),
         )
         .arg(
+            Arg::with_name("fp-bytes")
+                .short("f")
+                .long("fp-bytes")
+                .help("Number of bytes to read for file fingerprint")
+                .default_value("4096")
+                .takes_value(true),
+        )
+        .arg(
             Arg::with_name("verbose")
                 .short("v")
                 .long("verbose")
@@ -166,11 +192,11 @@ fn main() -> io::Result<()> {
     let paths = matches
         .values_of("paths")
         .expect("paths are a required argument");
-    let min_size = value_t!(matches.value_of("min-size"), u64).unwrap_or_else(|e| e.exit());
     let run_opts = RunOptions {
         verbose: matches.is_present("verbose"),
-        min_size: min_size,
+        min_size: value_t!(matches.value_of("min-size"), u64).unwrap_or_else(|e| e.exit()),
         quick_scan: matches.is_present("quick-scan"),
+        fp_bytes: value_t!(matches.value_of("fp-bytes"), usize).unwrap_or_else(|e| e.exit()),
     };
     let mut file_infos: Vec<FileInfo> = Vec::new();
     for path in paths {
