@@ -16,6 +16,7 @@ struct FileInfo {
 struct RunOptions {
     verbose: bool,
     min_size: u64,
+    quick_scan: bool,
 }
 
 fn collect_files(
@@ -108,112 +109,31 @@ fn group_duplicates<'a>(
 ) -> io::Result<Vec<Vec<&'a FileInfo>>> {
     let fi: Vec<&'a FileInfo> = file_infos.iter().collect();
     let by_size = non_singleton_groups_by(&fi, |f| Ok(f.size))?;
-    let mut num_by_size = 0;
+    if run_opts.verbose {
+        let size: usize = by_size.iter().map(|g| g.len()).sum();
+        println!("Duplicates by size: {}", size);
+    }
     let mut by_fp = Vec::new();
     for group in by_size {
-        num_by_size += group.len();
         by_fp.extend(non_singleton_groups_by(&group, file_fp)?);
     }
-    let mut num_by_fp = 0;
+    if run_opts.verbose {
+        let size: usize = by_fp.iter().map(|g| g.len()).sum();
+        println!("Duplicates by fingerprint: {}", size);
+    }
+    if run_opts.quick_scan {
+        // Skip SHA256 checksums on quick scan.
+        return Ok(by_fp);
+    }
     let mut by_hash = Vec::new();
     for group in by_fp {
-        num_by_fp += group.len();
         by_hash.extend(non_singleton_groups_by(&group, file_sha256)?);
     }
-    let mut num_by_hash = 0;
-    for group in &by_hash {
-        num_by_hash += group.len();
-    }
     if run_opts.verbose {
-        println!(
-            "Duplicates\n\tby_size: {}\n\tby_fp:{}\n\tby_sha256:{}",
-            num_by_size, num_by_fp, num_by_hash
-        );
+        let size: usize = by_hash.iter().map(|g| g.len()).sum();
+        println!("Duplicates by sha256: {}", size);
     }
     return Ok(by_hash);
-}
-
-fn _group_duplicates<'a>(
-    file_infos: &'a [FileInfo],
-    run_opts: &RunOptions,
-) -> io::Result<Vec<Vec<&'a FileInfo>>> {
-    let mut result = Vec::new();
-    let mut num_groups_by_size = 0;
-    let mut num_groups_by_fp = 0;
-    let mut num_groups_by_hash = 0;
-    let mut groups: HashMap<u64, Vec<&FileInfo>> = HashMap::new();
-    // First, group by file size.
-    for file_info in file_infos {
-        if let Some(group) = groups.get_mut(&file_info.size) {
-            group.push(file_info);
-        } else {
-            groups.insert(file_info.size, vec![file_info]);
-        }
-    }
-    for (_, group) in groups {
-        // Each group that is not a singleton must be further analyzed.
-        if group.len() > 1 {
-            num_groups_by_size += 1;
-            // Group by file "fingerprint" (some bytes from the middle of the file).
-            const FP_SIZE: u64 = 1024;
-            let mut same_fps: HashMap<[u8; FP_SIZE as usize], Vec<&FileInfo>> = HashMap::new();
-            for file_info in group {
-                let mut f_in = File::open(&file_info.path)?;
-                if file_info.size > 2 * FP_SIZE {
-                    f_in.seek(io::SeekFrom::Start(file_info.size / 2))?;
-                }
-                let mut buf: [u8; 1024] = [0; 1024];
-                f_in.read(&mut buf)?;
-                if let Some(same_fp) = same_fps.get_mut(&buf) {
-                    same_fp.push(file_info);
-                } else {
-                    same_fps.insert(buf, vec![file_info]);
-                }
-            }
-            for (_, same_fp) in same_fps {
-                if same_fp.len() > 1 {
-                    num_groups_by_fp += 1;
-                    let mut same_hashes: HashMap<[u8; 32], Vec<&FileInfo>> = HashMap::new();
-                    for file_info in same_fp {
-                        let mut context = Context::new(&SHA256);
-                        let mut f_in = File::open(&file_info.path)?;
-                        let mut buf: [u8; 1024] = [0; 1024];
-                        loop {
-                            let num_read = f_in.read(&mut buf)?;
-                            if num_read == 0 {
-                                break;
-                            } else {
-                                context.update(&buf[..num_read]);
-                            }
-                        }
-                        let hash = context
-                            .finish()
-                            .as_ref()
-                            .try_into()
-                            .expect("Unexpected digest size");
-                        if let Some(same_hash) = same_hashes.get_mut(&hash) {
-                            same_hash.push(file_info);
-                        } else {
-                            same_hashes.insert(hash, vec![file_info]);
-                        }
-                    }
-                    for (_, same_hash) in same_hashes {
-                        if same_hash.len() > 1 {
-                            num_groups_by_hash += 1;
-                            result.push(same_hash);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if run_opts.verbose {
-        println!(
-            "Duplicate groups:\n\tby size: {}\n\tby file_fp: {}\n\tby hash: {}",
-            num_groups_by_size, num_groups_by_fp, num_groups_by_hash
-        );
-    }
-    return Ok(result);
 }
 
 fn main() -> io::Result<()> {
@@ -236,15 +156,21 @@ fn main() -> io::Result<()> {
                 .long("verbose")
                 .help("Print verbose (debug) output"),
         )
+        .arg(
+            Arg::with_name("quick-scan")
+                .short("q")
+                .long("quick-scan")
+                .help("Only compare file fingerprints, skip checksums"),
+        )
         .get_matches();
     let paths = matches
         .values_of("paths")
         .expect("paths are a required argument");
     let min_size = value_t!(matches.value_of("min-size"), u64).unwrap_or_else(|e| e.exit());
-    let verbose = matches.is_present("verbose");
     let run_opts = RunOptions {
-        verbose: verbose,
+        verbose: matches.is_present("verbose"),
         min_size: min_size,
+        quick_scan: matches.is_present("quick-scan"),
     };
     let mut file_infos: Vec<FileInfo> = Vec::new();
     for path in paths {
