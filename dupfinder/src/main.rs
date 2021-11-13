@@ -2,6 +2,7 @@ use clap::{value_t, App, Arg};
 use itertools::Itertools;
 use regex::Regex;
 use ring::digest::{Context, SHA256};
+use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
@@ -29,6 +30,10 @@ struct RunOptions {
     included_extensions: HashSet<String>,
     // Only include files matching path_regex.
     path_regex: Option<Regex>,
+    // Only output duplicates outside the given folder.
+    originals_folder: Option<path::PathBuf>,
+    // Compact output (no empty lines).
+    compact_output: bool,
 }
 
 const IMAGE_EXTS: &[&str] = &[
@@ -47,10 +52,10 @@ fn accept_file(path: &path::Path, md: &fs::Metadata, run_opts: &RunOptions) -> b
         return false;
     }
     if !run_opts.included_extensions.is_empty() {
-        if let Some(ext) = path.extension() {
+        if let Some(ext) = path.extension().and_then(|p| p.to_str()) {
             if !run_opts
                 .included_extensions
-                .contains(&ext.to_str().unwrap_or("").to_lowercase())
+                .contains(&ext.to_lowercase()[..])
             {
                 return false;
             }
@@ -201,6 +206,18 @@ fn group_duplicates<'a>(
     return Ok(by_hash);
 }
 
+fn args_err<T>(message: &str) -> io::Result<T> {
+    return Err(io::Error::new(io::ErrorKind::Other, message));
+}
+
+fn is_original(file_info: &FileInfo, run_opts: &RunOptions) -> io::Result<bool> {
+    if let Some(orig) = &run_opts.originals_folder {
+        let abspath = file_info.path.canonicalize()?;
+        return Ok(abspath.starts_with(orig));
+    }
+    return Ok(false);
+}
+
 fn main() -> io::Result<()> {
     let matches = App::new("dupfinder")
         .version("0.1")
@@ -235,6 +252,9 @@ fn main() -> io::Result<()> {
                 .long("quick-scan")
                 .help("Only compare file fingerprints, skip checksums"),
         )
+        .arg(Arg::with_name("compact").short("c").long("compact").help(
+            "Do not output any empty lines (useful for getting a list of to-be-deleted files)",
+        ))
         .arg(
             Arg::with_name("images")
                 .short("i")
@@ -248,6 +268,13 @@ fn main() -> io::Result<()> {
                 .help("Only compare files matching regular expression")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("originals")
+                .short("o")
+                .long("originals")
+                .help("Only output duplicates from outside this folder")
+                .takes_value(true),
+        )
         .get_matches();
     let paths = matches
         .values_of("paths")
@@ -255,18 +282,34 @@ fn main() -> io::Result<()> {
     let path_regex = if matches.is_present("path-regex") {
         match Regex::new(matches.value_of("path-regex").unwrap()) {
             Ok(re) => Some(re),
-            Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
+            Err(e) => return args_err(&e.to_string()),
         }
     } else {
         None
     };
+    let mut originals_folder = None;
+    if let Some(f) = matches.value_of("originals") {
+        let p = path::Path::new(f).canonicalize()?;
+        let attr = fs::metadata(&p)?;
+        if attr.is_dir() {
+            originals_folder = Some(p);
+        } else {
+            return args_err(&format!("Not a folder: {}", f));
+        }
+    }
     let run_opts = RunOptions {
         verbose: matches.is_present("verbose"),
         min_size: value_t!(matches.value_of("min-size"), u64).unwrap_or_else(|e| e.exit()),
         quick_scan: matches.is_present("quick-scan"),
         fp_bytes: value_t!(matches.value_of("fp-bytes"), usize).unwrap_or_else(|e| e.exit()),
-        included_extensions: IMAGE_EXTS.iter().map(|s| String::from(*s)).collect(),
+        included_extensions: if matches.is_present("images") {
+            IMAGE_EXTS.into_iter().map(|s| String::from(*s)).collect()
+        } else {
+            HashSet::new()
+        },
         path_regex: path_regex,
+        originals_folder: originals_folder,
+        compact_output: matches.is_present("compact"),
     };
     let mut file_infos: Vec<FileInfo> = Vec::new();
     for path in paths {
@@ -289,21 +332,33 @@ fn main() -> io::Result<()> {
     let total_size: u64 = file_infos.iter().map(|e| e.size).sum();
     let dup_groups = group_duplicates(&file_infos, &run_opts)?;
     let mut dup_size: u64 = 0;
-    for group in &dup_groups {
-        for (i, file_info) in group.iter().enumerate() {
-            println!("{}", file_info.path.to_string_lossy());
-            if i > 0 {
-                dup_size += file_info.size;
+    let num_dup_groups = dup_groups.len();
+    for group in dup_groups {
+        // Compute size of duplicates (ignoring originals).
+        let mut num_originals = 0;
+        let group_len = group.len() as u64;
+        let file_size = group[0].size;
+        for file_info in group.into_iter() {
+            if is_original(file_info, &run_opts)? {
+                num_originals += 1;
+                if run_opts.verbose {
+                    println!("[original] {}", file_info.path.to_string_lossy());
+                }
+            } else {
+                println!("{}", file_info.path.to_string_lossy());
             }
         }
-        println!();
+        dup_size += (group_len - cmp::max(1, num_originals)) * file_size;
+        if !run_opts.compact_output {
+            println!();
+        }
     }
     if run_opts.verbose {
         println!(
             "Found {} files ({} bytes) and {} duplicate groups ({} redundant bytes).",
             file_infos.len(),
             total_size,
-            dup_groups.len(),
+            num_dup_groups,
             dup_size,
         );
     }
