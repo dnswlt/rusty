@@ -1,13 +1,14 @@
 use clap::{value_t, App, Arg};
+use itertools::Itertools;
+use regex::Regex;
 use ring::digest::{Context, SHA256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
 use std::hash::Hash;
 use std::io;
 use std::io::prelude::*;
 use std::path;
-use itertools::Itertools;
 
 struct FileInfo {
     path: path::PathBuf,
@@ -15,10 +16,54 @@ struct FileInfo {
 }
 
 struct RunOptions {
+    // Print statistics about duplicates found.
     verbose: bool,
+    // Minimum file size. Ignore all smaller files.
     min_size: u64,
+    // Compare files only based on fingerprint.
+    // May yield false positives, but is *much* faster.
     quick_scan: bool,
+    // Number of bytes to read as file fingerprint.
     fp_bytes: usize,
+    // Include only files with the given extensions.
+    included_extensions: HashSet<String>,
+    // Only include files matching path_regex.
+    path_regex: Option<Regex>,
+}
+
+const IMAGE_EXTS: &[&str] = &[
+    // The common image format (exluding RAW):
+    "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", //
+    // RAW formats
+    "dng", "raw", "rw2", "raf", "nef", "nrw", "arw", "sr2", "cr2", "orf", //
+    // Photo editors
+    "psd", "xcf", //
+    // Video files
+    "mov", "mp4", ".avi",
+];
+
+fn accept_file(path: &path::Path, md: &fs::Metadata, run_opts: &RunOptions) -> bool {
+    if md.len() < run_opts.min_size {
+        return false;
+    }
+    if !run_opts.included_extensions.is_empty() {
+        if let Some(ext) = path.extension() {
+            if !run_opts
+                .included_extensions
+                .contains(&ext.to_str().unwrap_or("").to_lowercase())
+            {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    if let Some(re) = &run_opts.path_regex {
+        if !re.is_match(&path.to_string_lossy()) {
+            return false;
+        }
+    }
+    return true;
 }
 
 fn collect_files(
@@ -37,7 +82,7 @@ fn collect_files(
         let path = entry.path();
         if path.is_file() {
             let md = entry.metadata()?;
-            if md.len() >= run_opts.min_size {
+            if accept_file(&path, &md, run_opts) {
                 files.push(FileInfo {
                     path: path,
                     size: md.len(),
@@ -85,7 +130,9 @@ fn file_fp(file_info: &FileInfo, fp_size: usize) -> io::Result<Vec<u8>> {
     return Ok(buf);
 }
 
-fn file_sha256(file_info: &FileInfo) -> io::Result<[u8; 32]> {
+type ShaChecksum = [u8; 32];
+
+fn file_sha256(file_info: &FileInfo) -> io::Result<ShaChecksum> {
     const CHUNK_SIZE: usize = 100 * 1024;
     let mut context = Context::new(&SHA256);
     let mut f_in = File::open(&file_info.path)?;
@@ -188,15 +235,38 @@ fn main() -> io::Result<()> {
                 .long("quick-scan")
                 .help("Only compare file fingerprints, skip checksums"),
         )
+        .arg(
+            Arg::with_name("images")
+                .short("i")
+                .long("images")
+                .help("Only compare files having an image file type extension (e.g. JPG)"),
+        )
+        .arg(
+            Arg::with_name("path-regex")
+                .short("p")
+                .long("path-regex")
+                .help("Only compare files matching regular expression")
+                .takes_value(true),
+        )
         .get_matches();
     let paths = matches
         .values_of("paths")
         .expect("paths are a required argument");
+    let path_regex = if matches.is_present("path-regex") {
+        match Regex::new(matches.value_of("path-regex").unwrap()) {
+            Ok(re) => Some(re),
+            Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
+        }
+    } else {
+        None
+    };
     let run_opts = RunOptions {
         verbose: matches.is_present("verbose"),
         min_size: value_t!(matches.value_of("min-size"), u64).unwrap_or_else(|e| e.exit()),
         quick_scan: matches.is_present("quick-scan"),
         fp_bytes: value_t!(matches.value_of("fp-bytes"), usize).unwrap_or_else(|e| e.exit()),
+        included_extensions: IMAGE_EXTS.iter().map(|s| String::from(*s)).collect(),
+        path_regex: path_regex,
     };
     let mut file_infos: Vec<FileInfo> = Vec::new();
     for path in paths {
@@ -220,15 +290,17 @@ fn main() -> io::Result<()> {
     let dup_groups = group_duplicates(&file_infos, &run_opts)?;
     let mut dup_size: u64 = 0;
     for group in &dup_groups {
-        for file_info in group {
+        for (i, file_info) in group.iter().enumerate() {
             println!("{}", file_info.path.to_string_lossy());
-            dup_size += file_info.size;
+            if i > 0 {
+                dup_size += file_info.size;
+            }
         }
         println!();
     }
     if run_opts.verbose {
         println!(
-            "Found {} files ({} bytes) and {} duplicate groups ({} bytes).",
+            "Found {} files ({} bytes) and {} duplicate groups ({} redundant bytes).",
             file_infos.len(),
             total_size,
             dup_groups.len(),
