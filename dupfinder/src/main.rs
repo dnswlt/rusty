@@ -207,7 +207,7 @@ fn group_duplicates<'a>(
 }
 
 fn args_err<T>(message: &str) -> io::Result<T> {
-    return Err(io::Error::new(io::ErrorKind::Other, message));
+    return Err(io::Error::new(io::ErrorKind::InvalidInput, message));
 }
 
 fn is_original(file_info: &FileInfo, run_opts: &RunOptions) -> io::Result<bool> {
@@ -216,6 +216,28 @@ fn is_original(file_info: &FileInfo, run_opts: &RunOptions) -> io::Result<bool> 
         return Ok(abspath.starts_with(orig));
     }
     return Ok(false);
+}
+
+// Removes duplicate occurrences in paths and subsumes descendant directories
+// by their ancestors (e.g. if "./foo" and "./foo/bar/baz" are in paths, 
+// the result will only contain "./foo").
+fn subsume_paths<'a>(paths: &[&'a str]) -> io::Result<Vec<&'a str>> {
+    let mut abs_paths = Vec::new();
+    for (i, path) in paths.iter().enumerate() {
+        let abs_path = path::Path::new(path).canonicalize()?;
+        abs_paths.push((abs_path, i));
+    }
+    abs_paths.sort();
+    let mut current_parent = &abs_paths[0];
+    let mut result = Vec::new();
+    for abs_path in abs_paths.iter().skip(1) {
+        if !abs_path.0.starts_with(&current_parent.0) {
+            result.push(paths[current_parent.1]);
+            current_parent = abs_path;
+        }
+    }
+    result.push(paths[current_parent.1]);
+    return Ok(result);
 }
 
 fn main() -> io::Result<()> {
@@ -276,9 +298,10 @@ fn main() -> io::Result<()> {
                 .takes_value(true),
         )
         .get_matches();
-    let paths = matches
+    let mut paths: Vec<&str> = matches
         .values_of("paths")
-        .expect("paths are a required argument");
+        .expect("paths are a required argument")
+        .collect();
     let path_regex = if matches.is_present("path-regex") {
         match Regex::new(matches.value_of("path-regex").unwrap()) {
             Ok(re) => Some(re),
@@ -289,6 +312,7 @@ fn main() -> io::Result<()> {
     };
     let mut originals_folder = None;
     if let Some(f) = matches.value_of("originals") {
+        paths.push(f);
         let p = path::Path::new(f).canonicalize()?;
         let attr = fs::metadata(&p)?;
         if attr.is_dir() {
@@ -312,7 +336,9 @@ fn main() -> io::Result<()> {
         compact_output: matches.is_present("compact"),
     };
     let mut file_infos: Vec<FileInfo> = Vec::new();
-    for path in paths {
+    let deduped_paths = subsume_paths(&paths)?;
+    println!("Deduped paths are: {}", deduped_paths.join(","));
+    for path in deduped_paths {
         match fs::metadata(path) {
             Ok(attr) => {
                 if attr.is_file() && attr.len() >= run_opts.min_size {
@@ -349,7 +375,7 @@ fn main() -> io::Result<()> {
             }
         }
         dup_size += (group_len - cmp::max(1, num_originals)) * file_size;
-        if !run_opts.compact_output {
+        if group_len > num_originals && !run_opts.compact_output {
             println!();
         }
     }
