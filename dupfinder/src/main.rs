@@ -30,7 +30,7 @@ struct RunOptions {
     included_extensions: HashSet<String>,
     // Only include files matching path_regex.
     path_regex: Option<Regex>,
-    // Only output duplicates outside the given folder.
+    // Only output duplicates outside the given folder (stored as an absolute path).
     originals_folder: Option<path::PathBuf>,
     // Compact output (no empty lines).
     compact_output: bool,
@@ -72,30 +72,36 @@ fn accept_file(path: &path::Path, md: &fs::Metadata, run_opts: &RunOptions) -> b
 }
 
 fn collect_files(
-    dir: &path::Path,
+    path: &path::Path,
     files: &mut Vec<FileInfo>,
     run_opts: &RunOptions,
 ) -> io::Result<()> {
-    if !dir.is_dir() {
+    if path.is_file() {
+        files.push(FileInfo {
+            path: path.to_path_buf(),
+            size: fs::metadata(&path)?.len(),
+        });
+    } else if path.is_dir() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let child_path = entry.path();
+            if child_path.is_file() {
+                let md = entry.metadata()?;
+                if accept_file(&child_path, &md, run_opts) {
+                    files.push(FileInfo {
+                        path: child_path,
+                        size: md.len(),
+                    });
+                }
+            } else if child_path.is_dir() {
+                collect_files(&child_path, files, run_opts)?;
+            }
+        }
+    } else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Not a directory: {}", dir.to_string_lossy()),
+            format!("Not file nor directory: {}", path.to_string_lossy()),
         ));
-    }
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() {
-            let md = entry.metadata()?;
-            if accept_file(&path, &md, run_opts) {
-                files.push(FileInfo {
-                    path: path,
-                    size: md.len(),
-                });
-            }
-        } else if path.is_dir() {
-            collect_files(&path, files, run_opts)?;
-        }
     }
     return Ok(());
 }
@@ -219,7 +225,7 @@ fn is_original(file_info: &FileInfo, run_opts: &RunOptions) -> io::Result<bool> 
 }
 
 // Removes duplicate occurrences in paths and subsumes descendant directories
-// by their ancestors (e.g. if "./foo" and "./foo/bar/baz" are in paths, 
+// by their ancestors (e.g. if "./foo" and "./foo/bar/baz" are in paths,
 // the result will only contain "./foo").
 fn subsume_paths<'a>(paths: &[&'a str]) -> io::Result<Vec<&'a str>> {
     let mut abs_paths = Vec::new();
@@ -294,7 +300,7 @@ fn main() -> io::Result<()> {
             Arg::with_name("originals")
                 .short("o")
                 .long("originals")
-                .help("Only output duplicates from outside this folder")
+                .help("Only output duplicates from outside this folder with a match inside it")
                 .takes_value(true),
         )
         .get_matches();
@@ -336,30 +342,20 @@ fn main() -> io::Result<()> {
         compact_output: matches.is_present("compact"),
     };
     let mut file_infos: Vec<FileInfo> = Vec::new();
-    let deduped_paths = subsume_paths(&paths)?;
-    println!("Deduped paths are: {}", deduped_paths.join(","));
-    for path in deduped_paths {
-        match fs::metadata(path) {
-            Ok(attr) => {
-                if attr.is_file() && attr.len() >= run_opts.min_size {
-                    file_infos.push(FileInfo {
-                        path: path::PathBuf::from(path),
-                        size: attr.len(),
-                    });
-                } else if attr.is_dir() {
-                    collect_files(path::Path::new(path), &mut file_infos, &run_opts)?;
-                } else {
-                    eprintln!("Ignoring {}: neither file nor directory", path);
-                }
-            }
-            Err(e) => eprintln!("Ignoring {}: {}", path, e),
-        }
+    for path in subsume_paths(&paths)? {
+        collect_files(path::Path::new(path), &mut file_infos, &run_opts)?;
     }
     let total_size: u64 = file_infos.iter().map(|e| e.size).sum();
     let dup_groups = group_duplicates(&file_infos, &run_opts)?;
     let mut dup_size: u64 = 0;
     let num_dup_groups = dup_groups.len();
     for group in dup_groups {
+        // Skip group if it does not contain an original.
+        if run_opts.originals_folder.is_some()
+            && !group.iter().any(|f| is_original(f, &run_opts).unwrap())
+        {
+            continue;
+        }
         // Compute size of duplicates (ignoring originals).
         let mut num_originals = 0;
         let group_len = group.len() as u64;
