@@ -1,10 +1,11 @@
+use chrono::Local;
 use clap::{value_t, App, Arg};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::process::Command;
-use std::time::Duration;
 use std::str;
+use std::time::Duration;
 
 const IPV4_MULTICAST_ADDR: &'static str = "224.0.0.199";
 const IPV4_MULTICAST_PORT: u16 = 10199;
@@ -13,6 +14,7 @@ const BUF_SIZE: usize = 1024;
 #[derive(Serialize, Deserialize, Debug)]
 struct ServerInfo {
     hostname: String,
+    local_time: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -24,7 +26,7 @@ enum Message {
 fn get_hostname() -> io::Result<String> {
     let output = Command::new("hostname").output()?;
     match str::from_utf8(&output.stdout) {
-        Ok(h) => Ok(h.trim_end().to_string()),  // Remove trailing "\n".
+        Ok(h) => Ok(h.trim_end().to_string()), // Remove trailing "\n".
         Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
     }
 }
@@ -41,8 +43,11 @@ fn server(multicast_addr: Ipv4Addr, multicast_port: u16) -> io::Result<()> {
             String::from("")
         }
     };
-    let server_msg = bincode::serialize(&Message::Hello(ServerInfo { hostname: hostname }))
-        .expect("Cannot serialize Hello Message.");
+    let server_msg = bincode::serialize(&Message::Hello(ServerInfo {
+        hostname: hostname,
+        local_time: Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+    }))
+    .expect("Cannot serialize Hello Message.");
     loop {
         match socket.recv_from(&mut buf) {
             Ok((n_bytes, src_addr)) => {
