@@ -2,16 +2,28 @@ use clap::{value_t, App, Arg};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::net::{Ipv4Addr, UdpSocket};
+use std::process::Command;
 use std::time::Duration;
 
 const IPV4_MULTICAST_ADDR: &'static str = "224.0.0.199";
 const IPV4_MULTICAST_PORT: u16 = 10199;
 const BUF_SIZE: usize = 1024;
 
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
+struct ServerInfo {
+    hostname: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 enum Message {
     Discover,
-    Hello,
+    Hello(ServerInfo),
+}
+
+fn get_hostname() -> io::Result<String> {
+    let output = Command::new("hostname").output()?;
+    return String::from_utf8(output.stdout)
+        .or_else(|e| Err(io::Error::new(io::ErrorKind::InvalidData, e)));
 }
 
 fn server(multicast_addr: Ipv4Addr, multicast_port: u16) -> io::Result<()> {
@@ -19,15 +31,22 @@ fn server(multicast_addr: Ipv4Addr, multicast_port: u16) -> io::Result<()> {
     let mut buf = [0; BUF_SIZE];
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, multicast_port))?;
     socket.join_multicast_v4(&multicast_addr, &Ipv4Addr::UNSPECIFIED)?;
+    let hostname = match get_hostname() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("Could not get hostname: {}", e);
+            String::from("")
+        }
+    };
+    let server_msg = bincode::serialize(&Message::Hello(ServerInfo { hostname: hostname }))
+        .expect("Cannot serialize Hello Message.");
     loop {
         match socket.recv_from(&mut buf) {
             Ok((n_bytes, src_addr)) => {
                 println!("Received {} bytes from {}", n_bytes, src_addr);
                 match bincode::deserialize(&buf) {
                     Ok(Message::Discover) => {
-                        let reply =
-                            bincode::serialize(&Message::Hello).expect("Cannot serialize Message.");
-                        socket.send_to(&reply, &src_addr)?;
+                        socket.send_to(&server_msg, &src_addr)?;
                     }
                     _ => {
                         println!("Ignoring invalid message.");
@@ -51,8 +70,11 @@ fn client(multicast_addr: Ipv4Addr, multicast_port: u16, limit: i32) -> io::Resu
             let mut buf = [0; BUF_SIZE];
             match socket.recv_from(&mut buf) {
                 Ok((_, src_addr)) => match bincode::deserialize(&buf) {
-                    Ok(Message::Hello) => {
-                        println!("Received reply from {}", src_addr);
+                    Ok(Message::Hello(server_info)) => {
+                        println!(
+                            "Received reply from {} ({})",
+                            src_addr, &server_info.hostname
+                        );
                     }
                     _ => {
                         println!("Ignoring invalid message.");
