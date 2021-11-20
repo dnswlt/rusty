@@ -4,6 +4,7 @@ use std::io;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::process::Command;
 use std::time::Duration;
+use std::str;
 
 const IPV4_MULTICAST_ADDR: &'static str = "224.0.0.199";
 const IPV4_MULTICAST_PORT: u16 = 10199;
@@ -22,8 +23,10 @@ enum Message {
 
 fn get_hostname() -> io::Result<String> {
     let output = Command::new("hostname").output()?;
-    return String::from_utf8(output.stdout)
-        .or_else(|e| Err(io::Error::new(io::ErrorKind::InvalidData, e)));
+    match str::from_utf8(&output.stdout) {
+        Ok(h) => Ok(h.trim_end().to_string()),  // Remove trailing "\n".
+        Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+    }
 }
 
 fn server(multicast_addr: Ipv4Addr, multicast_port: u16) -> io::Result<()> {

@@ -64,7 +64,7 @@ fn accept_file(path: &path::Path, md: &fs::Metadata, run_opts: &RunOptions) -> b
         }
     }
     if let Some(re) = &run_opts.path_regex {
-        if !re.is_match(&path.to_string_lossy()) {
+        if path.to_str().map_or(false, |p| re.is_match(p)) {
             return false;
         }
     }
@@ -318,10 +318,11 @@ fn main() -> io::Result<()> {
     };
     let mut originals_folder = None;
     if let Some(f) = matches.value_of("originals") {
-        paths.push(f);
         let p = path::Path::new(f).canonicalize()?;
         let attr = fs::metadata(&p)?;
         if attr.is_dir() {
+            // Make sure to scan originals folder as well.
+            paths.push(f);
             originals_folder = Some(p);
         } else {
             return args_err(&format!("Not a folder: {}", f));
@@ -352,7 +353,7 @@ fn main() -> io::Result<()> {
     for group in dup_groups {
         // Skip group if it does not contain an original.
         if run_opts.originals_folder.is_some()
-            && !group.iter().any(|f| is_original(f, &run_opts).unwrap())
+            && !group.iter().any(|f| is_original(f, &run_opts).unwrap_or(false))
         {
             continue;
         }
