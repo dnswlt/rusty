@@ -36,24 +36,25 @@ fn server(multicast_addr: Ipv4Addr, multicast_port: u16) -> io::Result<()> {
     let mut buf = [0; BUF_SIZE];
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, multicast_port))?;
     socket.join_multicast_v4(&multicast_addr, &Ipv4Addr::UNSPECIFIED)?;
-    let hostname = match get_hostname() {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("Could not get hostname: {}", e);
-            String::from("")
-        }
-    };
-    let server_msg = bincode::serialize(&Message::Hello(ServerInfo {
-        hostname: hostname,
-        local_time: Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
-    }))
-    .expect("Cannot serialize Hello Message.");
     loop {
         match socket.recv_from(&mut buf) {
             Ok((n_bytes, src_addr)) => {
                 println!("Received {} bytes from {}", n_bytes, src_addr);
                 match bincode::deserialize(&buf) {
                     Ok(Message::Discover) => {
+                        let hostname = match get_hostname() {
+                            Ok(h) => h,
+                            Err(e) => {
+                                eprintln!("Could not get hostname: {}", e);
+                                String::from("")
+                            }
+                        };
+                        let hello = Message::Hello(ServerInfo {
+                            hostname: hostname,
+                            local_time: Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+                        });
+                        let server_msg =
+                            bincode::serialize(&hello).expect("Cannot serialize Hello Message.");
                         socket.send_to(&server_msg, &src_addr)?;
                     }
                     _ => {
