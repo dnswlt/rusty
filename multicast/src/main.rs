@@ -80,8 +80,8 @@ fn client(multicast_addr: Ipv4Addr, multicast_port: u16, limit: i32) -> io::Resu
                 Ok((_, src_addr)) => match bincode::deserialize(&buf) {
                     Ok(Message::Hello(server_info)) => {
                         println!(
-                            "Received reply from {} ({})",
-                            src_addr, &server_info.hostname
+                            "Received reply from {} ({}, {})",
+                            src_addr, &server_info.hostname, &server_info.local_time
                         );
                     }
                     _ => {
