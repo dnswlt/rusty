@@ -15,6 +15,7 @@ const BUF_SIZE: usize = 1024;
 struct ServerInfo {
     hostname: String,
     local_time: String,
+    message: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -31,7 +32,7 @@ fn get_hostname() -> io::Result<String> {
     }
 }
 
-fn server(multicast_addr: Ipv4Addr, multicast_port: u16) -> io::Result<()> {
+fn server(multicast_addr: Ipv4Addr, multicast_port: u16, message: &str) -> io::Result<()> {
     // Type of buf will be resolved to [u8; BUF_SIZE] later on through usage.
     let mut buf = [0; BUF_SIZE];
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, multicast_port))?;
@@ -52,6 +53,7 @@ fn server(multicast_addr: Ipv4Addr, multicast_port: u16) -> io::Result<()> {
                         let hello = Message::Hello(ServerInfo {
                             hostname: hostname,
                             local_time: Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+                            message: message.to_string(),
                         });
                         let server_msg =
                             bincode::serialize(&hello).expect("Cannot serialize Hello Message.");
@@ -81,8 +83,15 @@ fn client(multicast_addr: Ipv4Addr, multicast_port: u16, limit: i32) -> io::Resu
                 Ok((_, src_addr)) => match bincode::deserialize(&buf) {
                     Ok(Message::Hello(server_info)) => {
                         println!(
-                            "Received reply from {} ({}, {})",
-                            src_addr, &server_info.hostname, &server_info.local_time
+                            "Received reply from {} ({}, {}{})",
+                            src_addr,
+                            &server_info.hostname,
+                            &server_info.local_time,
+                            if server_info.message.is_empty() {
+                                server_info.message
+                            } else {
+                                format!(" \"{}\"", &server_info.message)
+                            }
                         );
                     }
                     _ => {
@@ -121,12 +130,23 @@ fn main() -> io::Result<()> {
                 .default_value("1")
                 .help("Number of discovery messages to send as client."),
         )
+        .arg(
+            Arg::with_name("message")
+                .short("m")
+                .long("message")
+                .takes_value(true)
+                .help("Optional message to send back in Hello messages."),
+        )
         .get_matches();
     let multicast_addr: Ipv4Addr = IPV4_MULTICAST_ADDR
         .parse()
         .expect("Invalid IPv4 multicast address.");
     if matches.is_present("server_mode") {
-        server(multicast_addr, IPV4_MULTICAST_PORT)
+        server(
+            multicast_addr,
+            IPV4_MULTICAST_PORT,
+            matches.value_of("message").unwrap_or(""),
+        )
     } else {
         let limit = value_t!(matches.value_of("limit"), i32).unwrap_or_else(|e| e.exit());
         client(multicast_addr, IPV4_MULTICAST_PORT, limit)
