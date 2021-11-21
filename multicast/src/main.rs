@@ -9,7 +9,7 @@ use std::time::Duration;
 
 const IPV4_MULTICAST_ADDR: &'static str = "224.0.0.199";
 const IPV4_MULTICAST_PORT: u16 = 10199;
-const BUF_SIZE: usize = 1024;
+const BUF_SIZE: usize = 4096;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ServerInfo {
@@ -38,35 +38,22 @@ fn server(multicast_addr: Ipv4Addr, multicast_port: u16, message: &str) -> io::R
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, multicast_port))?;
     socket.join_multicast_v4(&multicast_addr, &Ipv4Addr::UNSPECIFIED)?;
     loop {
-        match socket.recv_from(&mut buf) {
-            Ok((n_bytes, src_addr)) => {
-                println!("Received {} bytes from {}", n_bytes, src_addr);
-                match bincode::deserialize(&buf) {
-                    Ok(Message::Discover) => {
-                        let hostname = match get_hostname() {
-                            Ok(h) => h,
-                            Err(e) => {
-                                eprintln!("Could not get hostname: {}", e);
-                                String::from("")
-                            }
-                        };
-                        let hello = Message::Hello(ServerInfo {
-                            hostname: hostname,
-                            local_time: Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
-                            message: message.to_string(),
-                        });
-                        let server_msg =
-                            bincode::serialize(&hello).expect("Cannot serialize Hello Message.");
-                        socket.send_to(&server_msg, &src_addr)?;
-                    }
-                    _ => {
-                        println!("Ignoring invalid message.");
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(e);
-            }
+        let (n_bytes, src_addr) = socket.recv_from(&mut buf)?;
+        println!("Received {} bytes from {}", n_bytes, src_addr);
+        if let Ok(Message::Discover) = bincode::deserialize(&buf) {
+            let hostname = get_hostname().unwrap_or_else(|e| {
+                eprintln!("Could not get hostname: {}", e);
+                String::from("")
+            });
+            let hello = Message::Hello(ServerInfo {
+                hostname: hostname,
+                local_time: Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+                message: message.to_string(),
+            });
+            let server_msg = bincode::serialize(&hello).expect("Cannot serialize Hello Message.");
+            socket.send_to(&server_msg, &src_addr)?;
+        } else {
+            eprintln!("Ignoring invalid message.");
         }
     }
 }
@@ -80,24 +67,29 @@ fn client(multicast_addr: Ipv4Addr, multicast_port: u16, limit: i32) -> io::Resu
         loop {
             let mut buf = [0; BUF_SIZE];
             match socket.recv_from(&mut buf) {
-                Ok((_, src_addr)) => match bincode::deserialize(&buf) {
-                    Ok(Message::Hello(server_info)) => {
+                Ok((_, src_addr)) => {
+                    if let Ok(Message::Hello(server_info)) = bincode::deserialize(&buf) {
                         println!(
-                            "Received reply from {} ({}, {}{})",
+                            "Received reply from {} ({})",
                             src_addr,
-                            &server_info.hostname,
-                            &server_info.local_time,
-                            if server_info.message.is_empty() {
-                                server_info.message
-                            } else {
-                                format!(" \"{}\"", &server_info.message)
-                            }
+                            [
+                                server_info.hostname,
+                                server_info.local_time,
+                                if server_info.message.is_empty() {
+                                    server_info.message
+                                } else {
+                                    format!("\"{}\"", server_info.message)
+                                }
+                            ]
+                            .into_iter()
+                            .filter(|e| e.len() > 0)
+                            .collect::<Vec<_>>()
+                            .join(", ")
                         );
-                    }
-                    _ => {
+                    } else {
                         println!("Ignoring invalid message.");
                     }
-                },
+                }
                 Err(e) => match e.kind() {
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
                         break;
