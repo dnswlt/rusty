@@ -1,8 +1,11 @@
 use chrono::Local;
 use clap::{value_t, App, Arg};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, UdpSocket};
+use std::path::Path;
 use std::process::Command;
 use std::str;
 use std::time::Duration;
@@ -11,9 +14,16 @@ const IPV4_MULTICAST_ADDR: &'static str = "224.0.0.199";
 const IPV4_MULTICAST_PORT: u16 = 10199;
 const BUF_SIZE: usize = 4096;
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct MacAddr {
+    interface: String,
+    address: String,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct ServerInfo {
     hostname: String,
+    mac_addresses: Vec<MacAddr>,
     local_time: String,
     message: String,
 }
@@ -22,6 +32,53 @@ struct ServerInfo {
 enum Message {
     Discover,
     Hello(ServerInfo),
+}
+
+impl fmt::Display for ServerInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ServerInfo{{\n")?;
+        if !self.hostname.is_empty() {
+            writeln!(f, "  hostname: {}", self.hostname)?;
+        }
+        if !self.mac_addresses.is_empty() {
+            writeln!(f, "  mac_addresses: {{")?;
+            for mac_addr in &self.mac_addresses {
+                writeln!(f, "    {}: {}", mac_addr.interface, mac_addr.address)?;
+            }
+            writeln!(f, "  }}")?;
+        }
+        if !self.local_time.is_empty() {
+            writeln!(f, "  local_time: {}", self.local_time)?;
+        }
+        if !self.message.is_empty() {
+            writeln!(f, "  message: {}", self.message)?;
+        }
+        write!(f, "}}")
+    }
+}
+
+fn get_mac_addrs() -> io::Result<Vec<MacAddr>> {
+    let net = Path::new("/sys/class/net");
+    if !net.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Probably not on a Linux machine: no /sys/class/net found.",
+        ));
+    }
+    let mut addrs = Vec::new();
+    for entry in net.read_dir()? {
+        if let Ok(entry) = entry {
+            let path_buf = entry.path().join("address");
+            let addr = fs::read_to_string(path_buf)?;
+            if let Some(iface) = entry.file_name().to_str() {
+                addrs.push(MacAddr {
+                    interface: iface.to_string(),
+                    address: addr,
+                });
+            }
+        }
+    }
+    return Ok(addrs);
 }
 
 fn get_hostname() -> io::Result<String> {
@@ -37,6 +94,13 @@ fn server(multicast_addr: Ipv4Addr, multicast_port: u16, message: &str) -> io::R
     let mut buf = [0; BUF_SIZE];
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, multicast_port))?;
     socket.join_multicast_v4(&multicast_addr, &Ipv4Addr::UNSPECIFIED)?;
+    let mac_addresses = match get_mac_addrs() {
+        Ok(mac_addrs) => mac_addrs,
+        Err(e) => {
+            eprintln!("Cannot get MAC addresses: {}", e);
+            vec![]
+        }
+    };
     loop {
         let (n_bytes, src_addr) = socket.recv_from(&mut buf)?;
         println!("Received {} bytes from {}", n_bytes, src_addr);
@@ -47,13 +111,14 @@ fn server(multicast_addr: Ipv4Addr, multicast_port: u16, message: &str) -> io::R
             });
             let hello = Message::Hello(ServerInfo {
                 hostname: hostname,
+                mac_addresses: mac_addresses.clone(),
                 local_time: Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
                 message: message.to_string(),
             });
             let server_msg = bincode::serialize(&hello).expect("Cannot serialize Hello Message.");
             socket.send_to(&server_msg, &src_addr)?;
         } else {
-            eprintln!("Ignoring invalid message.");
+            eprintln!("Ignoring invalid message from {}.", src_addr);
         }
     }
 }
@@ -69,25 +134,9 @@ fn client(multicast_addr: Ipv4Addr, multicast_port: u16, limit: i32) -> io::Resu
             match socket.recv_from(&mut buf) {
                 Ok((_, src_addr)) => {
                     if let Ok(Message::Hello(server_info)) = bincode::deserialize(&buf) {
-                        println!(
-                            "Received reply from {} ({})",
-                            src_addr,
-                            [
-                                server_info.hostname,
-                                server_info.local_time,
-                                if server_info.message.is_empty() {
-                                    server_info.message
-                                } else {
-                                    format!("\"{}\"", server_info.message)
-                                }
-                            ]
-                            .into_iter()
-                            .filter(|e| e.len() > 0)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                        );
+                        println!("Received reply from {}:\n{}", src_addr, server_info);
                     } else {
-                        println!("Ignoring invalid message.");
+                        println!("Ignoring invalid message from {}.", src_addr);
                     }
                 }
                 Err(e) => match e.kind() {
