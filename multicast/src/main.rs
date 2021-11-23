@@ -69,11 +69,14 @@ fn get_mac_addrs() -> io::Result<Vec<MacAddr>> {
     for entry in net.read_dir()? {
         if let Ok(entry) = entry {
             let path_buf = entry.path().join("address");
-            let addr = fs::read_to_string(path_buf)?;
             if let Some(iface) = entry.file_name().to_str() {
+                if iface == "lo" {
+                    continue;  // Ignore loopback
+                }
+                let addr = fs::read_to_string(path_buf)?;
                 addrs.push(MacAddr {
                     interface: iface.to_string(),
-                    address: addr,
+                    address: addr.trim_end().to_string(),
                 });
             }
         }
