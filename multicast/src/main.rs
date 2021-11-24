@@ -8,7 +8,8 @@ use std::net::{Ipv4Addr, UdpSocket};
 use std::path::Path;
 use std::process::Command;
 use std::str;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::thread;
 
 const IPV4_MULTICAST_ADDR: &'static str = "224.0.0.199";
 const IPV4_MULTICAST_PORT: u16 = 10199;
@@ -71,7 +72,7 @@ fn get_mac_addrs() -> io::Result<Vec<MacAddr>> {
             let path_buf = entry.path().join("address");
             if let Some(iface) = entry.file_name().to_str() {
                 if iface == "lo" {
-                    continue;  // Ignore loopback
+                    continue; // Ignore loopback
                 }
                 let addr = fs::read_to_string(path_buf)?;
                 addrs.push(MacAddr {
@@ -186,11 +187,33 @@ fn main() -> io::Result<()> {
         .parse()
         .expect("Invalid IPv4 multicast address.");
     if matches.is_present("server_mode") {
-        server(
-            multicast_addr,
-            IPV4_MULTICAST_PORT,
-            matches.value_of("message").unwrap_or(""),
-        )
+        let message = matches.value_of("message").unwrap_or("");
+        // Try for at most 1 minute to start the server. This can be useful at system
+        // startup, where the network interfaces might not be fully functional when
+        // this program is started.
+        const MAX_STARTUP_DELAY_SECONDS: u64 = 60;
+        let started = Instant::now();
+        loop {
+            println!(
+                "Trying to start server at {}:{}",
+                multicast_addr, IPV4_MULTICAST_PORT
+            );
+            match server(multicast_addr, IPV4_MULTICAST_PORT, message) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    eprintln!("Failed to start server: {}", e);
+                    let elapsed = started.elapsed();
+                    if elapsed.as_secs() > MAX_STARTUP_DELAY_SECONDS {
+                        eprintln!(
+                            "Failed to start server for {}s. Giving up.",
+                            MAX_STARTUP_DELAY_SECONDS
+                        );
+                        return Err(e);
+                    }
+                    thread::sleep(Duration::from_millis(1000));
+                }
+            }
+        }
     } else {
         let limit = value_t!(matches.value_of("limit"), i32).unwrap_or_else(|e| e.exit());
         client(multicast_addr, IPV4_MULTICAST_PORT, limit)
