@@ -40,21 +40,31 @@ fn main() -> io::Result<()> {
                 .default_value("9")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("verbose")
+                .short("v")
+                .long("verbose")
+                .help("Print verbose output"),
+        )
         .get_matches();
+    let verbose = matches.is_present("verbose");
     let mac_addr = value_t!(matches.value_of("mac-addr"), String).unwrap_or_else(|e| e.exit());
     let broadcast_addr =
         value_t!(matches.value_of("broadcast-addr"), String).unwrap_or_else(|e| e.exit());
     let port = value_t!(matches.value_of("port"), u16).unwrap_or_else(|e| e.exit());
-    
     let mac_re = Regex::new("^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$").expect("Broken regex");
     assert!(mac_re.is_match(&mac_addr));
     let mac_bytes = decode_hex(&str::replace(&mac_addr, ":", "")).expect("Invalid hex");
-    
     let mut data = decode_hex("ffffffffffff").unwrap();
     for _ in 0..16 {
         data.extend(&mac_bytes);
     }
-
+    if verbose {
+        println!(
+            "Sending wake-on-lan packet to {} on broacast address {}:{}",
+            mac_addr, broadcast_addr, port
+        );
+    }
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     sock.set_broadcast(true)?;
     sock.send_to(&data[..], format!("{}:{}", broadcast_addr, port))?;
