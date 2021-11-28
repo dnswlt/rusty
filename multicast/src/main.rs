@@ -8,8 +8,8 @@ use std::net::{Ipv4Addr, UdpSocket};
 use std::path::Path;
 use std::process::Command;
 use std::str;
-use std::time::{Duration, Instant};
 use std::thread;
+use std::time::{Duration, Instant};
 
 const IPV4_MULTICAST_ADDR: &'static str = "224.0.0.199";
 const IPV4_MULTICAST_PORT: u16 = 10199;
@@ -37,12 +37,12 @@ enum Message {
 
 impl fmt::Display for ServerInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ServerInfo{{\n")?;
+        write!(f, "ServerInfo {{\n")?;
         if !self.hostname.is_empty() {
             writeln!(f, "  hostname: {}", self.hostname)?;
         }
         if !self.mac_addresses.is_empty() {
-            writeln!(f, "  mac_addresses: {{")?;
+            writeln!(f, "  mac_addresses {{")?;
             for mac_addr in &self.mac_addresses {
                 writeln!(f, "    {}: {}", mac_addr.interface, mac_addr.address)?;
             }
@@ -131,14 +131,27 @@ fn client(multicast_addr: Ipv4Addr, multicast_port: u16, limit: i32) -> io::Resu
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     let dsco_msg = bincode::serialize(&Message::Discover).expect("Cannot serialize Message.");
     socket.set_read_timeout(Some(Duration::from_millis(2000)))?;
+    let mut num_received = 0;
     for _ in 0..limit {
+        let send_time = Instant::now();
         socket.send_to(&dsco_msg, (multicast_addr, multicast_port))?;
         loop {
             let mut buf = [0; BUF_SIZE];
             match socket.recv_from(&mut buf) {
-                Ok((_, src_addr)) => {
+                Ok((n_bytes, src_addr)) => {
+                    let recv_delay = send_time.elapsed();
+                    num_received += 1;
+                    if num_received > 1 {
+                        println!();
+                    }
                     if let Ok(Message::Hello(server_info)) = bincode::deserialize(&buf) {
-                        println!("Received reply from {}:\n{}", src_addr, server_info);
+                        println!(
+                            "Reply from {} (time={}ms, {} bytes):\n{}",
+                            src_addr,
+                            recv_delay.as_millis(),
+                            n_bytes,
+                            server_info
+                        );
                     } else {
                         println!("Ignoring invalid message from {}.", src_addr);
                     }
@@ -176,6 +189,12 @@ fn main() -> io::Result<()> {
                 .help("Number of discovery messages to send as client."),
         )
         .arg(
+            Arg::with_name("max-startup-seconds")
+                .long("max-startup-seconds")
+                .default_value("30")
+                .help("Maximum amount of time spent trying to spin up the server."),
+        )
+        .arg(
             Arg::with_name("message")
                 .short("m")
                 .long("message")
@@ -188,32 +207,26 @@ fn main() -> io::Result<()> {
         .expect("Invalid IPv4 multicast address.");
     if matches.is_present("server_mode") {
         let message = matches.value_of("message").unwrap_or("");
-        // Try for at most 1 minute to start the server. This can be useful at system
-        // startup, where the network interfaces might not be fully functional when
-        // this program is started.
-        const MAX_STARTUP_DELAY_SECONDS: u64 = 60;
+        // Try for at most --max-startup-seconds to start the server.
+        // This can be useful at system startup, where the network interfaces
+        // might not be fully functional when this program is started.
+        let max_startup_seconds =
+            value_t!(matches.value_of("max-startup-seconds"), u64).unwrap_or_else(|e| e.exit());
         let started = Instant::now();
-        loop {
+        while started.elapsed().as_secs() < max_startup_seconds {
             println!(
                 "Trying to start server at {}:{}",
                 multicast_addr, IPV4_MULTICAST_PORT
             );
             match server(multicast_addr, IPV4_MULTICAST_PORT, message) {
-                Ok(()) => return Ok(()),
                 Err(e) => {
                     eprintln!("Failed to start server: {}", e);
-                    let elapsed = started.elapsed();
-                    if elapsed.as_secs() > MAX_STARTUP_DELAY_SECONDS {
-                        eprintln!(
-                            "Failed to start server for {}s. Giving up.",
-                            MAX_STARTUP_DELAY_SECONDS
-                        );
-                        return Err(e);
-                    }
                     thread::sleep(Duration::from_millis(1000));
                 }
+                _ => break,
             }
         }
+        return Ok(());
     } else {
         let limit = value_t!(matches.value_of("limit"), i32).unwrap_or_else(|e| e.exit());
         client(multicast_addr, IPV4_MULTICAST_PORT, limit)
