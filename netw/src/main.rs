@@ -145,8 +145,8 @@ fn send_bytes(n_bytes: i64, out_stream: &mut TcpStream) -> std::io::Result<()> {
         } else {
             BUF_SIZE
         };
-        out_stream.write_all(&buf[0..n_bytes])?;
-        rem_bytes -= n_bytes as i64;
+        let n_written = out_stream.write(&buf[0..n_bytes])?;
+        rem_bytes -= n_written as i64;
     }
     Ok(())
 }
