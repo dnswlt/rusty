@@ -35,6 +35,9 @@ struct Args {
     bytes_upload: i64,
 }
 
+// Number of bytes to send to ACK reception of up/download data.
+const ACK_BYTES: i64 = 4;
+
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
@@ -48,6 +51,10 @@ fn main() -> std::io::Result<()> {
 fn run_client(args: Args) -> std::io::Result<()> {
     let bytes_download = args.bytes_download;
     let bytes_upload = args.bytes_upload;
+    if bytes_download <= 0 && bytes_upload <= 0 {
+        println!("Nothing to do.");
+        return Ok(())
+    }
     let mut stream = TcpStream::connect((args.host, args.port))?;
     let in_stream = stream.try_clone()?;
     // Send command
@@ -61,19 +68,26 @@ fn run_client(args: Args) -> std::io::Result<()> {
     let zero: [u8; 1] = [0; 1];
     stream.write(&zero)?;
     stream.flush()?;
-    // Download bytes
-    let dl_started = Instant::now();
     let mut buf_reader = BufReader::new(in_stream);
-    consume_bytes(bytes_download, &mut buf_reader)?;
-    let dl_elapsed = dl_started.elapsed().as_micros();
-    let dl_rate = bytes_download as f64 / dl_elapsed as f64;
-    println!("Download completed: {bytes_download} bytes in {dl_elapsed}us ({dl_rate:.3}MB/s)",);
-    // Upload bytes
-    let up_started = Instant::now();
-    send_bytes(args.bytes_upload, &mut stream)?;
-    let up_elapsed = up_started.elapsed().as_micros();
-    let up_rate = bytes_upload as f64 / up_elapsed as f64;
-    println!("Upload completed: {bytes_upload} bytes in {up_elapsed}us ({up_rate:.3}MB/s)",);
+    if bytes_download > 0 {
+        // Download bytes
+        let dl_started = Instant::now();
+        consume_bytes(bytes_download, &mut buf_reader)?;
+        let dl_elapsed = dl_started.elapsed().as_micros();
+        let dl_rate = bytes_download as f64 / dl_elapsed as f64;
+        println!("Download completed: {bytes_download} bytes in {dl_elapsed}us ({dl_rate:.3}MB/s)",);
+    }
+    if bytes_upload > 0 {
+        // Upload bytes
+        let up_started = Instant::now();
+        send_bytes(args.bytes_upload, &mut stream)?;
+        // To measure end-to-end throughput, wait for an ACK from the other side that all data has arrived.
+        consume_bytes(4, &mut buf_reader)?;
+        let up_elapsed = up_started.elapsed().as_micros();
+        let up_rate = bytes_upload as f64 / up_elapsed as f64;
+
+        println!("Upload completed: {bytes_upload} bytes in {up_elapsed}us ({up_rate:.3}MB/s)",);
+    }
     Ok(())
 }
 
@@ -131,8 +145,14 @@ fn measure_throughput(
     params: MeasureThroughputParams,
 ) -> std::io::Result<()> {
     // Send bytes for download
-    send_bytes(params.bytes_download, &mut out_stream)?;
-    consume_bytes(params.bytes_upload, &mut buf_reader)
+    if params.bytes_download > 0 {
+        send_bytes(params.bytes_download, &mut out_stream)?;
+    }
+    if params.bytes_upload > 0 {
+        consume_bytes(params.bytes_upload, &mut buf_reader)?;
+        send_bytes(ACK_BYTES, &mut out_stream)?;
+    }
+    Ok(())
 }
 
 fn send_bytes(n_bytes: i64, out_stream: &mut TcpStream) -> std::io::Result<()> {
