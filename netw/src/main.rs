@@ -82,7 +82,7 @@ fn run_client(args: Args) -> std::io::Result<()> {
         let up_started = Instant::now();
         send_bytes(args.bytes_upload, &mut stream)?;
         // To measure end-to-end throughput, wait for an ACK from the other side that all data has arrived.
-        consume_bytes(4, &mut buf_reader)?;
+        consume_bytes(ACK_BYTES, &mut buf_reader)?;
         let up_elapsed = up_started.elapsed().as_micros();
         let up_rate = bytes_upload as f64 / up_elapsed as f64;
 
