@@ -1,15 +1,16 @@
 use clap::Parser;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::{
-    io::{prelude::*},
+    io::prelude::*,
     net::{TcpListener, TcpStream},
 };
 
 #[derive(Serialize, Deserialize, Debug)]
 struct MeasureThroughputParams {
-    bytes_download: i64,
-    bytes_upload: i64,
+    bytes_download: u64,
+    bytes_upload: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -25,69 +26,102 @@ enum NetwCommand {
 struct Args {
     #[arg(short = 'l', long, default_value_t = false)]
     server_mode: bool,
+    #[arg(long, default_value_t = String::from("0.0.0.0"))]
+    listen_addr: String,
     #[arg(short = 's', long, default_value_t = String::from("127.0.0.1"))]
     host: String,
     #[arg(short, long, default_value_t = 7878)]
     port: u16,
-    #[arg(short = 'n', long, default_value_t = 1000000)]
-    bytes_download: i64,
-    #[arg(short = 'm', long, default_value_t = 0)]
-    bytes_upload: i64,
+    #[arg(short = 'n', long, default_value_t = 1024 * 1024, value_parser = parse_num_with_units)]
+    bytes_download: u64,
+    #[arg(short = 'm', long, default_value_t = 0, value_parser = parse_num_with_units)]
+    bytes_upload: u64,
+    #[arg(long, default_value_t = 5000)]
+    sock_timeout_millis: u64,
 }
 
-// Number of bytes to send to ACK reception of up/download data.
-const ACK_BYTES: i64 = 4;
+// Number of bytes to send to ACK reception of download data.
+const ACK_BYTES: u64 = 4;
+const BUF_SIZE: usize = 8 * 1024;
 
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
-
     if args.server_mode {
-        return run_server();
+        return run_server(args);
     } else {
         return run_client(args);
     }
 }
 
+fn parse_num_with_units(s: &str) -> Result<u64, String> {
+    let re = Regex::new(r"(\d+)([kmgtKMGT])?").unwrap();
+    if let Some(caps) = re.captures(s.trim()) {
+        let b: u64 = caps.get(1).unwrap().as_str().parse().unwrap();
+        if let Some(unit) = caps.get(2) {
+            match unit.as_str().to_uppercase().as_str() {
+                "K" => {
+                    return Ok(1024 * b);
+                }
+                "M" => {
+                    return Ok(1024 * 1024 * b);
+                }
+                "G" => {
+                    return Ok(1024 * 1024 * 1024 * b);
+                }
+                "T" => {
+                    return Ok(1024 * 1024 * 1024 * 1024 * b);
+                }
+                _ => {}
+            }
+        } else {
+            return Ok(b);
+        }
+    }
+    return Err(format!("Invalid number {}", s));
+}
+
 fn run_client(args: Args) -> std::io::Result<()> {
     let bytes_download = args.bytes_download;
     let bytes_upload = args.bytes_upload;
-    if bytes_download <= 0 && bytes_upload <= 0 {
+    if bytes_download == 0 && bytes_upload == 0 {
         println!("Nothing to do.");
         return Ok(());
     }
     let mut out_stream = TcpStream::connect((args.host, args.port))?;
+    out_stream.set_write_timeout(Some(Duration::from_millis(args.sock_timeout_millis)))?;
     let in_stream = out_stream.try_clone()?;
+    in_stream.set_read_timeout(Some(Duration::from_millis(args.sock_timeout_millis)))?;
     send_command(
         &NetwCommand::MeasureThroughput(MeasureThroughputParams {
-            bytes_download: args.bytes_download,
-            bytes_upload: args.bytes_upload,
+            bytes_download: bytes_download,
+            bytes_upload: bytes_upload,
         }),
         &out_stream,
     )?;
     if bytes_download > 0 {
         // Download bytes
         let dl_started = Instant::now();
-        consume_bytes(bytes_download, &in_stream)?;
+        recv_bytes(bytes_download, &in_stream)?;
         let dl_elapsed = dl_started.elapsed().as_micros();
         let dl_rate = bytes_download as f64 / dl_elapsed as f64;
-        println!("Download completed: {bytes_download} bytes in {dl_elapsed}us ({dl_rate:.3}MB/s)",);
+        println!("Download completed: {bytes_download} bytes in {dl_elapsed}us ({dl_rate:.3} MB/s)",);
     }
     if bytes_upload > 0 {
         // Upload bytes
         let up_started = Instant::now();
-        send_bytes(args.bytes_upload, &mut out_stream)?;
+        send_bytes(bytes_upload, &mut out_stream)?;
         // To measure end-to-end throughput, wait for an ACK from the other side that all data has arrived.
-        consume_bytes(ACK_BYTES, &in_stream)?;
+        recv_bytes(ACK_BYTES, &in_stream)?;
         let up_elapsed = up_started.elapsed().as_micros();
         let up_rate = bytes_upload as f64 / up_elapsed as f64;
 
-        println!("Upload completed: {bytes_upload} bytes in {up_elapsed}us ({up_rate:.3}MB/s)",);
+        println!("Upload completed: {bytes_upload} bytes in {up_elapsed}us ({up_rate:.3} MB/s)",);
     }
     Ok(())
 }
 
-fn run_server() -> std::io::Result<()> {
-    let listener = TcpListener::bind("0.0.0.0:7878")?;
+fn run_server(args: Args) -> std::io::Result<()> {
+    let listener = TcpListener::bind((args.listen_addr, args.port))?;
     println!("Listening on {}", listener.local_addr().unwrap());
 
     for stream in listener.incoming() {
@@ -97,6 +131,8 @@ fn run_server() -> std::io::Result<()> {
                     "New incoming connection from {}",
                     stream.peer_addr().unwrap()
                 );
+                stream.set_read_timeout(Some(Duration::from_millis(args.sock_timeout_millis)))?;
+                stream.set_write_timeout(Some(Duration::from_millis(args.sock_timeout_millis)))?;
                 handle_connection(stream).unwrap_or_else(|e| {
                     println!("Unsuccessful connection: {}", e);
                 });
@@ -146,43 +182,42 @@ fn recv_command(mut in_stream: &TcpStream) -> std::io::Result<NetwCommand> {
 }
 
 fn measure_throughput(
-    mut in_stream: TcpStream,
-    mut out_stream: TcpStream,
+    in_stream: TcpStream,
+    out_stream: TcpStream,
     params: MeasureThroughputParams,
 ) -> std::io::Result<()> {
     // Send bytes for download
     if params.bytes_download > 0 {
-        send_bytes(params.bytes_download, &mut out_stream)?;
+        send_bytes(params.bytes_download, &out_stream)?;
     }
     if params.bytes_upload > 0 {
-        consume_bytes(params.bytes_upload, &mut in_stream)?;
-        send_bytes(ACK_BYTES, &mut out_stream)?;
+        recv_bytes(params.bytes_upload, &in_stream)?;
+        send_bytes(ACK_BYTES, &out_stream)?;
     }
     Ok(())
 }
 
-fn send_bytes(n_bytes: i64, mut out_stream: &TcpStream) -> std::io::Result<()> {
-    let mut rem_bytes: i64 = n_bytes;
-    const BUF_SIZE: usize = 8192;
-    let buf = vec![42; BUF_SIZE];
+fn send_bytes(n_bytes: u64, mut out_stream: &TcpStream) -> std::io::Result<()> {
+    let mut rem_bytes: u64 = n_bytes;
+    let buf = vec![0x55; BUF_SIZE];
     while rem_bytes > 0 {
-        let n_bytes = if rem_bytes < (BUF_SIZE as i64) {
+        let n_bytes = if rem_bytes < (BUF_SIZE as u64) {
             rem_bytes as usize
         } else {
             BUF_SIZE
         };
         let n_written = out_stream.write(&buf[0..n_bytes])?;
-        rem_bytes -= n_written as i64;
+        rem_bytes -= n_written as u64;
     }
     out_stream.flush()
 }
 
-fn consume_bytes(n_bytes: i64, mut in_stream: &TcpStream) -> std::io::Result<()> {
-    let mut buf = [0 as u8; 8192];
-    let mut rem_bytes: i64 = n_bytes;
+fn recv_bytes(n_bytes: u64, mut in_stream: &TcpStream) -> std::io::Result<()> {
+    let mut buf = [0 as u8; BUF_SIZE];
+    let mut rem_bytes: u64 = n_bytes;
     while rem_bytes > 0 {
         let n_read = in_stream.read(&mut buf)?;
-        rem_bytes -= n_read as i64;
+        rem_bytes -= n_read as u64;
     }
     Ok(())
 }
