@@ -161,31 +161,32 @@ fn run_client_latency(args: Args) -> std::io::Result<()> {
         stream.read_exact(&mut buf)?;
         durations.push(started.elapsed());
     }
-    print_latency_stats(durations);
+    print_latency_stats(durations, args.message_size_bytes);
     Ok(())
 }
 
-fn print_latency_stats(mut ds : Vec<Duration>) {
-    if ds.is_empty() { return; }
+fn print_latency_stats(mut ds: Vec<Duration>, message_size_bytes: u64) {
+    if ds.is_empty() {
+        return;
+    }
     ds.sort();
     if ds.len() < 10 {
         println!("Durations: {:?}", ds);
         return;
     }
-    let avg = ds.iter().map(|d| { d.as_micros() }).sum::<u128>() as f64 / ds.len() as f64;
-    let p50 = (ds.len() + 1) / 2;
-    let p90 = (ds.len() + 1) * 90 / 100;
-    let p95 = (ds.len() + 1) * 95 / 100;
-    let p99 = (ds.len() + 1) * 99 / 100;
-    println!("n: {}", ds.len());
+    let avg = ds.iter().map(|d| d.as_micros()).sum::<u128>() as f64 / ds.len() as f64;
+    let p50 = (ds.len() + 1) * 50 / 100 - 1;
+    let p90 = (ds.len() + 1) * 90 / 100 - 1;
+    let p95 = (ds.len() + 1) * 95 / 100 - 1;
+    let p99 = (ds.len() + 1) * 99 / 100 - 1;
+    println!("n: {}, bytes: {}", ds.len(), message_size_bytes);
     println!("avg: {:.0}us", avg.round());
     println!("min: {}us", ds[0].as_micros());
-    println!("p50: {}us", ds[min(p50, ds.len()-1)].as_micros());
-    println!("p90: {}us", ds[min(p90, ds.len()-1)].as_micros());
-    println!("p95: {}us", ds[min(p95, ds.len()-1)].as_micros());
-    println!("p99: {}us", ds[min(p99, ds.len()-1)].as_micros());
-    println!("max: {}us", ds[ds.len()-1].as_micros());
-
+    println!("p50: {}us", ds[min(p50, ds.len() - 1)].as_micros());
+    println!("p90: {}us", ds[min(p90, ds.len() - 1)].as_micros());
+    println!("p95: {}us", ds[min(p95, ds.len() - 1)].as_micros());
+    println!("p99: {}us", ds[min(p99, ds.len() - 1)].as_micros());
+    println!("max: {}us", ds[ds.len() - 1].as_micros());
 }
 
 fn run_server(args: Args) -> std::io::Result<()> {
