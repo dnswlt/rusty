@@ -40,8 +40,9 @@ struct Args {
     sock_timeout_millis: u64,
 }
 
-// Number of bytes to send to ACK reception of download data.
+// Number of bytes to send to ACK reception of upload data.
 const ACK_BYTES: u64 = 4;
+// Buffer size for sending and receiving data.
 const BUF_SIZE: usize = 8 * 1024;
 
 fn main() -> std::io::Result<()> {
@@ -54,22 +55,23 @@ fn main() -> std::io::Result<()> {
 }
 
 fn parse_num_with_units(s: &str) -> Result<u64, String> {
-    let re = Regex::new(r"(\d+)([kmgtKMGT])?").unwrap();
+    let re = Regex::new(r"^(\d+)(([kmgtKMGT])(i)?[bB]?)?$").unwrap();
     if let Some(caps) = re.captures(s.trim()) {
         let b: u64 = caps.get(1).unwrap().as_str().parse().unwrap();
-        if let Some(unit) = caps.get(2) {
+        let m = if caps.get(4).is_some() { 1024 } else { 1000 };
+        if let Some(unit) = caps.get(3) {
             match unit.as_str().to_uppercase().as_str() {
                 "K" => {
-                    return Ok(1024 * b);
+                    return Ok(b * m);
                 }
                 "M" => {
-                    return Ok(1024 * 1024 * b);
+                    return Ok(b * m * m);
                 }
                 "G" => {
-                    return Ok(1024 * 1024 * 1024 * b);
+                    return Ok(b * m * m * m);
                 }
                 "T" => {
-                    return Ok(1024 * 1024 * 1024 * 1024 * b);
+                    return Ok(b * m * m * m * m);
                 }
                 _ => {}
             }
@@ -104,7 +106,9 @@ fn run_client(args: Args) -> std::io::Result<()> {
         recv_bytes(bytes_download, &in_stream)?;
         let dl_elapsed = dl_started.elapsed().as_micros();
         let dl_rate = bytes_download as f64 / dl_elapsed as f64;
-        println!("Download completed: {bytes_download} bytes in {dl_elapsed}us ({dl_rate:.3} MB/s)",);
+        println!(
+            "Download completed: {bytes_download} bytes in {dl_elapsed}us ({dl_rate:.3} MB/s)",
+        );
     }
     if bytes_upload > 0 {
         // Upload bytes
