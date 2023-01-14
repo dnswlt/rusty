@@ -74,25 +74,17 @@ fn parse_num_with_units(s: &str) -> Result<u64, String> {
     if let Some(caps) = re.captures(s.trim()) {
         let b: u64 = caps.get(1).unwrap().as_str().parse().unwrap();
         let m = if caps.get(4).is_some() { 1024 } else { 1000 };
+        let mut f = 1;
         if let Some(unit) = caps.get(3) {
-            match unit.as_str().to_uppercase().as_str() {
-                "K" => {
-                    return Ok(b * m);
-                }
-                "M" => {
-                    return Ok(b * m * m);
-                }
-                "G" => {
-                    return Ok(b * m * m * m);
-                }
-                "T" => {
-                    return Ok(b * m * m * m * m);
-                }
-                _ => {}
+            f = match unit.as_str().to_uppercase().as_str() {
+                "K" => m,
+                "M" => m * m,
+                "G" => m * m * m,
+                "T" => m * m * m * m,
+                _ => return Err(format!("Invalid unit prefix '{:?}'", unit)),
             }
-        } else {
-            return Ok(b);
         }
+        return Ok(b * f);
     }
     return Err(format!("Invalid number {}", s));
 }
@@ -244,6 +236,7 @@ fn measure_latency(
     }
     Ok(())
 }
+
 fn measure_throughput(
     in_stream: TcpStream,
     out_stream: TcpStream,
@@ -308,4 +301,39 @@ fn recv_bytes(n_bytes: u64, mut in_stream: &TcpStream) -> std::io::Result<()> {
         rem_bytes -= n_read as u64;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parse_num_with_units_works() {
+        assert_eq!(parse_num_with_units("0").unwrap_or(1), 0);
+        assert_eq!(parse_num_with_units(" 1 ").unwrap_or(0), 1);
+        assert_eq!(parse_num_with_units("128").unwrap_or(0), 128);
+        assert_eq!(parse_num_with_units("3kb").unwrap_or(0), 3_000);
+        assert_eq!(parse_num_with_units("3Kib").unwrap_or(0), 3 * 1024);
+        assert_eq!(parse_num_with_units("1m").unwrap_or(0), 1_000_000);
+        assert_eq!(parse_num_with_units("1mi").unwrap_or(0), 1024 * 1024);
+        assert_eq!(parse_num_with_units("2MB").unwrap_or(0), 2_000_000);
+        assert_eq!(parse_num_with_units("2MiB").unwrap_or(0), 2 * 1024 * 1024);
+        assert_eq!(parse_num_with_units("9G").unwrap_or(0), 9_000_000_000);
+        assert_eq!(
+            parse_num_with_units("50TB").unwrap_or(0),
+            50_000_000_000_000
+        );
+    }
+    #[test]
+    fn parse_num_with_units_err() {
+        assert!(parse_num_with_units("").is_err());
+        assert!(parse_num_with_units("-1").is_err());
+        assert!(parse_num_with_units("1 m").is_err());
+        assert!(parse_num_with_units("1z").is_err());
+        assert!(parse_num_with_units("m").is_err());
+    }
+    #[test]
+    fn utf8_len() {
+        // str.len() counts bytes, not characters
+        assert_eq!("ä".len(), 2);
+    }
 }
