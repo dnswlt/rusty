@@ -1,0 +1,79 @@
+import time as t
+// same as
+let t = load("time")
+
+import net
+
+let template x = {
+    w: y * 2
+    y: 17
+    z: {
+        a: [1, 2, 3]
+    }
+    port: 8080
+}
+let datetime = t.datetime
+let date = t.date
+
+x {
+    n: 10
+    comment: trim("""
+        This is a trimmed multiline string. All whitespace before "This"
+        and the initial \n linebreak are removed.
+        Lovely.
+    """)
+    // Durations are so common in configs that they are a built-in type in Konfi.
+    // Use suffixes "s" for seconds, "ms" for milliseconds, "us" for microseconds,
+    // "m" "h" "d" for minutes, hours, days.
+    duration_ms: 1000ms
+    // 5 minutes and 10 seconds:
+    wait_time: 5m + 10s
+    // But what does this look like in the final config, e.g. represented as JSON?
+    // It's up to you:
+    wait_time: t.as_millis(5m + 10s)  // ==> 310000 in JSON. But still of type "duration"!
+    // Dates and times are also quite common:
+    start_date: date("2022-10-03")
+    end_time: datetime("2022-10-03 17:00:03 UTC" in "CET")
+
+    // Format strings can use other fields
+    host: "foosen.com"
+    url: "https://${host}:${port}/path/to/glory"
+    url_path: net.path(url)
+
+    // One side of the template coin is to just use fields that are predefined in
+    // the template (i.e., shared across instantiations). That avoids repetition
+    // for simple cases.
+    //
+    // The other side of the template coin is that the template itself might provide
+    // parameterized functionality for its instantiating records, based on arguments
+    // that the record passes on instantiation.
+    let template foo(host) = {
+        url: "https://${host}/bar"
+        port: case {
+                str.endswith(host, ".com"): 8080
+                else: 8081
+              }
+    }
+    foo1: foo("example.com")
+    foo2: foo("testing.de")
+
+    // But templates will have far too many parameters! That won't scale. E.g.,
+    let template(...) baz = {
+        params {
+            host: external
+            port: external
+            cell: external
+            num_threads: external
+            ram_per_thread: size.megabytes(100)
+        }
+        topic_url: "${host}:${port}/${cell}"
+        max_mem: params.num_threads * params.ram_per_thread
+    }
+    some_baz: baz({
+        
+    })
+
+    // Unset a field:
+    unset_field: nil
+
+}
