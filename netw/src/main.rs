@@ -51,7 +51,7 @@ struct Args {
     latency: bool,
     #[arg(short = 'k', long, value_name = "num", default_value_t = 500, value_parser = parse_num_with_units)]
     num_messages: u64,
-    #[arg(long, value_name = "bytes", default_value_t = 16, value_parser = parse_num_with_units)]
+    #[arg(long, value_name = "bytes", default_value_t = 64, value_parser = parse_num_with_units)]
     message_size_bytes: u64,
 }
 
@@ -171,7 +171,7 @@ fn print_latency_stats(mut ds: Vec<Duration>, message_size_bytes: u64) {
     let p90 = (ds.len() + 1) * 90 / 100 - 1;
     let p95 = (ds.len() + 1) * 95 / 100 - 1;
     let p99 = (ds.len() + 1) * 99 / 100 - 1;
-    println!("n: {}, bytes: {}", ds.len(), message_size_bytes);
+    println!("k: {}, bytes: {}", ds.len(), message_size_bytes);
     println!("avg: {:.0}us", avg.round());
     println!("min: {}us", ds[0].as_micros());
     println!("p50: {}us", ds[min(p50, ds.len() - 1)].as_micros());
