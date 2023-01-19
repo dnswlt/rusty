@@ -1,19 +1,21 @@
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnOp {
     UnPlus,  // +
     UnMinus, // -
     Not,     // !
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinOp {
     Plus,       // +
     Minus,      // -
+    Times,      // *
+    Div,        // /
     LogicalAnd, // &&
     LogicalOr,  // ||
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Literal {
     Nil,
     Int(i64),
@@ -21,27 +23,33 @@ pub enum Literal {
     Str(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct Var {
+    pub name: String,
+}
+
+#[derive(Debug, PartialEq)]
 pub enum Expr {
     Literal(Literal),
+    Var(Var),
     UnExpr(UnOp, Box<Expr>),
     BinExpr(Box<Expr>, BinOp, Box<Expr>),
     Rec(Record),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Record {
     let_vars: Vec<LetBinding>,
     fields: Vec<Field>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Field {
     name: String,
     value: Expr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct LetBinding {
     var: String,
     value: Expr,
