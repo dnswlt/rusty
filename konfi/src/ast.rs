@@ -34,23 +34,37 @@ pub enum Expr {
     Var(Var),
     UnExpr(UnOp, Box<Expr>),
     BinExpr(Box<Expr>, BinOp, Box<Expr>),
-    Rec(Record),
+    Rec(Rec),
+    Call(Call),
+    Fun(Fun),
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Record {
-    let_vars: Vec<LetBinding>,
-    fields: Vec<Field>,
+pub struct Fun {
+    params: Vec<Var>,
+    body: Box<Expr>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Call {
+    fun: Box<Expr>,
+    args: Vec<Box<Expr>>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Rec {
+    pub let_vars: Vec<LetBinding>,
+    pub fields: Vec<Field>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Field {
-    name: String,
-    value: Expr,
+    pub name: Var,
+    pub value: Box<Expr>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct LetBinding {
-    var: String,
+    var: Var,
     value: Expr,
 }

@@ -6,10 +6,10 @@ use nom::{
     bytes::complete::{tag, take_while, take_while1},
     character::complete::{char, multispace0, one_of},
     combinator::{map, map_res, opt, recognize},
-    error::{FromExternalError, ParseError},
+    error::{FromExternalError, ParseError, VerboseError},
     multi::{many0, many1},
-    sequence::{delimited, pair, terminated, tuple},
-    IResult,
+    sequence::{delimited, pair, preceded, terminated, tuple},
+    Finish, IResult,
 };
 
 // Whitespace parser.
@@ -29,6 +29,15 @@ where
     F: Fn(&'a str) -> IResult<&'a str, O, E> + 'a,
 {
     delimited(multispace0, inner, multispace0)
+}
+
+// Parse whitespace including at least one newline (for record fields).
+fn eol<'a, E>(i: &'a str) -> IResult<&'a str, &'a str, E>
+where
+    E: ParseError<&'a str>,
+{
+    let (i, _) = many0(one_of("\t "))(i)?;
+    alt((tag("\r\n"), tag("\n")))(i)
 }
 
 fn int_literal<'a, E>(input: &'a str) -> IResult<&str, ast::Literal, E>
@@ -69,7 +78,7 @@ where
             '-' => ast::BinOp::Minus,
             '*' => ast::BinOp::Times,
             '/' => ast::BinOp::Div,
-            _ => unreachable!("Not all binop characters covered")
+            _ => unreachable!("Not all binop characters covered"),
         }),
         map(tag("&&"), |_| ast::BinOp::LogicalAnd),
         map(tag("||"), |_| ast::BinOp::LogicalOr),
@@ -111,8 +120,41 @@ where
     ))(input)
 }
 
+fn rec_field<'a, E>(input: &'a str) -> IResult<&str, ast::Field, E>
+where
+    E: ParseError<&'a str> + FromExternalError<&'a str, ParseIntError> + 'a,
+{
+    map(pair(terminated(var, ws(char(':'))), expr), |(v, e)| {
+        ast::Field { name: v, value: e }
+    })(input)
+}
+
+fn rec<'a, E>(input: &'a str) -> IResult<&str, Box<ast::Expr>, E>
+where
+    E: ParseError<&'a str> + FromExternalError<&'a str, ParseIntError> + 'a,
+{
+    map(
+        delimited(
+            terminated(char('{'), multispace0),
+            many0(delimited(multispace0, rec_field, eol)), //
+            preceded(multispace0, char('}')),
+        ),
+        |fs| {
+            Box::new(ast::Expr::Rec(ast::Rec {
+                let_vars: vec![],
+                fields: fs,
+            }))
+        },
+    )(input)
+}
+
 #[cfg(test)]
 mod tests {
+    use nom::{
+        error::{convert_error, VerboseError},
+        Finish,
+    };
+
     use super::*;
 
     #[test]
@@ -178,7 +220,45 @@ mod tests {
                 assert_eq!(e, bin(bin(v("x"), plus, v("y")), times, l(3)));
             }
             err => {
-                panic!("{:?}", err)
+                panic!("Could not parse: {:?}", err);
+            }
+        }
+    }
+
+    fn mk_rec(fields: Vec<(&str, Box<ast::Expr>)>) -> Box<ast::Expr> {
+        let mut fs = Vec::new();
+        for (f, e) in fields.into_iter() {
+            fs.push(ast::Field {
+                name: ast::Var {
+                    name: String::from(f),
+                },
+                value: e,
+            });
+        }
+        Box::new(ast::Expr::Rec(ast::Rec {
+            let_vars: vec![],
+            fields: fs,
+        }))
+    }
+
+    #[test]
+    fn rec_empty() {
+        let l = |i| Box::new(ast::Expr::Literal(ast::Literal::Int(i)));
+        let input = r#"{
+            x: 7
+            y: 10
+        }"#;
+        match rec::<VerboseError<&str>>(input).finish() {
+            Ok((rem, e)) => {
+                assert!(
+                    rem.is_empty(),
+                    "Expected to consume all output. Remainder: {}",
+                    rem
+                );
+                assert_eq!(e, mk_rec(vec![("x", l(7)),("y", l(10))]));
+            }
+            Err(e) => {
+                panic!("Could not parse: {}", convert_error(input, e));
             }
         }
     }
