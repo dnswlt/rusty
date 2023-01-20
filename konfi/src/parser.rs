@@ -1,25 +1,17 @@
 use crate::ast;
+use crate::strings::parse_string;
 use std::num::ParseIntError;
 
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while, take_while1},
     character::complete::{char, multispace0, one_of},
-    combinator::{map, map_res, opt, recognize},
-    error::{FromExternalError, ParseError, VerboseError},
+    combinator::{cut, map, map_res, opt, recognize},
+    error::{FromExternalError, ParseError},
     multi::{many0, many1},
     sequence::{delimited, pair, preceded, terminated, tuple},
-    Finish, IResult,
+    IResult,
 };
-
-// Whitespace parser.
-fn sp<'a, E>(i: &'a str) -> IResult<&'a str, &'a str, E>
-where
-    E: ParseError<&'a str>,
-{
-    let space_chars = " \t\r\n";
-    take_while(move |c| space_chars.contains(c))(i)
-}
 
 /// A combinator that takes a parser `inner` and produces a parser that also consumes both leading and
 /// trailing whitespace, returning the output of `inner`.
@@ -68,21 +60,66 @@ where
     )(input)
 }
 
-fn binop<'a, E>(input: &'a str) -> IResult<&str, ast::BinOp, E>
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+enum BinopPrecedence {
+    Multiplicative, // * /
+    Additive,       // + -
+    Shift,          // >> <<
+    Relational,     // < > <= >=
+    Equality,       // == !=
+    LogicalAnd,     // &&
+    LogicalOr,      // ||
+}
+
+impl BinopPrecedence {
+    pub fn is_terminal(&self) -> bool {
+        *self == Self::Multiplicative
+    }
+    pub fn next(&self) -> Self {
+        match *self {
+            Self::LogicalOr => Self::LogicalAnd,
+            Self::LogicalAnd => Self::Equality,
+            Self::Equality => Self::Relational,
+            Self::Relational => Self::Shift,
+            Self::Shift => Self::Additive,
+            Self::Additive => Self::Multiplicative,
+            Self::Multiplicative => {
+                panic!("Called previous on {:?} which has no predecessor", self)
+            }
+        }
+    }
+}
+
+fn binop<'a, E>(lvl: BinopPrecedence, input: &'a str) -> IResult<&str, ast::BinOp, E>
 where
     E: ParseError<&'a str>,
 {
-    alt((
-        map(one_of("+-*/"), |c| match c {
-            '+' => ast::BinOp::Plus,
-            '-' => ast::BinOp::Minus,
-            '*' => ast::BinOp::Times,
-            '/' => ast::BinOp::Div,
-            _ => unreachable!("Not all binop characters covered"),
-        }),
-        map(tag("&&"), |_| ast::BinOp::LogicalAnd),
-        map(tag("||"), |_| ast::BinOp::LogicalOr),
-    ))(input)
+    match lvl {
+        BinopPrecedence::Multiplicative => alt((
+            map(tag("*"), |_| ast::BinOp::Times),
+            map(tag("/"), |_| ast::BinOp::Div),
+        ))(input),
+        BinopPrecedence::Additive => alt((
+            map(tag("+"), |_| ast::BinOp::Plus),
+            map(tag("-"), |_| ast::BinOp::Minus),
+        ))(input),
+        BinopPrecedence::Shift => alt((
+            map(tag(">>"), |_| ast::BinOp::ShiftLeft),
+            map(tag("<<"), |_| ast::BinOp::ShiftRight),
+        ))(input),
+        BinopPrecedence::Relational => alt((
+            map(tag("<="), |_| ast::BinOp::LessEq),
+            map(tag(">="), |_| ast::BinOp::GreaterEq),
+            map(tag("<"), |_| ast::BinOp::LessThan),
+            map(tag(">"), |_| ast::BinOp::GreaterThan),
+        ))(input),
+        BinopPrecedence::Equality => alt((
+            map(tag("=="), |_| ast::BinOp::Eq),
+            map(tag("!="), |_| ast::BinOp::NotEq),
+        ))(input),
+        BinopPrecedence::LogicalAnd => map(tag("&&"), |_| ast::BinOp::LogicalAnd)(input),
+        BinopPrecedence::LogicalOr => map(tag("||"), |_| ast::BinOp::LogicalOr)(input),
+    }
 }
 
 fn atom<'a, E>(input: &'a str) -> IResult<&str, Box<ast::Expr>, E>
@@ -90,7 +127,11 @@ where
     E: ParseError<&'a str> + FromExternalError<&'a str, ParseIntError> + 'a,
 {
     alt((
-        delimited(char('('), ws(expr), char(')')),
+        rec,
+        delimited(char('('), cut(ws(expr)), char(')')),
+        map(parse_string, |s| {
+            Box::new(ast::Expr::Literal(ast::Literal::Str(s)))
+        }),
         map(var, |v| Box::new(ast::Expr::Var(v))),
         map(int_literal, |l| Box::new(ast::Expr::Literal(l))),
     ))(input)
@@ -100,24 +141,59 @@ fn factor<'a, E>(input: &'a str) -> IResult<&str, Box<ast::Expr>, E>
 where
     E: ParseError<&'a str> + FromExternalError<&'a str, ParseIntError> + 'a,
 {
+    let mult_binop = |input| binop(BinopPrecedence::Multiplicative, input);
     alt((
-        map(tuple((atom, ws(binop), factor)), |(a, op, c)| {
+        map(tuple((atom, ws(mult_binop), factor)), |(a, op, c)| {
             Box::new(ast::Expr::BinExpr(a, op, c))
         }),
         atom,
     ))(input)
 }
 
-fn expr<'a, E>(input: &'a str) -> IResult<&str, Box<ast::Expr>, E>
+fn expr2<'a, E>(input: &'a str) -> IResult<&str, Box<ast::Expr>, E>
 where
     E: ParseError<&'a str> + FromExternalError<&'a str, ParseIntError> + 'a,
 {
+    let expr_binop = |input| binop(BinopPrecedence::Additive, input);
     alt((
-        map(tuple((factor, ws(binop), expr)), |(a, op, c)| {
+        map(tuple((factor, ws(expr_binop), expr)), |(a, op, c)| {
             Box::new(ast::Expr::BinExpr(a, op, c))
         }),
         factor,
     ))(input)
+}
+
+pub fn expr<'a, E>(input: &'a str) -> IResult<&str, Box<ast::Expr>, E>
+where
+    E: ParseError<&'a str> + FromExternalError<&'a str, ParseIntError> + 'a,
+{
+    gen_expr::<E>(BinopPrecedence::LogicalOr, input)
+}
+
+// Binary operators have different precedence ('*' binds more tightly than '+').
+// BinopPrecedence encodes the precedence of all binary operators and is used
+// here to obtain a generic recursive parser for all binary operators without the
+// usual expr=>term=>factor=>atom hierarchy.
+fn gen_expr<'a, E>(lvl: BinopPrecedence, input: &'a str) -> IResult<&str, Box<ast::Expr>, E>
+where
+    E: ParseError<&'a str> + FromExternalError<&'a str, ParseIntError> + 'a,
+{
+    let expr_binop = move |input| binop::<E>(lvl, input);
+    // Parse first subterm.
+    let (r1, a) = if lvl.is_terminal() {
+        atom(input)
+    } else {
+        gen_expr::<E>(lvl.next(), input)
+    }?;
+    // Try to parse a binary operator and, if successful, the second term.
+    // If no suitable operator follows, just return the first term.
+    match ws(expr_binop)(r1) {
+        Ok((r2, op)) => {
+            let (r2, b) = gen_expr::<E>(lvl, r2)?;
+            Ok((r2, Box::new(ast::Expr::BinExpr(a, op, b))))
+        }
+        _ => Ok((r1, a)),
+    }
 }
 
 fn rec_field<'a, E>(input: &'a str) -> IResult<&str, ast::Field, E>
@@ -150,116 +226,168 @@ where
 
 #[cfg(test)]
 mod tests {
-    use nom::{
-        error::{convert_error, VerboseError},
-        Finish,
-    };
 
     use super::*;
+    use nom::Finish;
 
-    #[test]
-    fn sp_works() {
-        assert_eq!(sp::<nom::error::Error<&str>>("  \t x"), Ok(("x", "  \t ")));
+    macro_rules! assert_parse {
+        ($f:ident, $e:expr) => {
+            let input = $e;
+            match $f::<nom::error::VerboseError<&str>>(input).finish() {
+                Ok((i, _)) => {
+                    assert_eq!(i, "", "Input not fully processed.");
+                }
+                Err(e) => {
+                    assert!(
+                        false,
+                        "Could not parse: {}",
+                        nom::error::convert_error(input, e)
+                    );
+                }
+            }
+        };
+    }
+    macro_rules! assert_finish {
+        ($e:literal, $f:ident, $v:expr) => {
+            let input = $e;
+            match $f::<nom::error::VerboseError<&str>>(input).finish() {
+                Ok((i, r)) => {
+                    assert_eq!(i, "", "Input not fully processed.");
+                    assert_eq!(r, $v);
+                }
+                Err(e) => {
+                    assert!(
+                        false,
+                        "Could not parse: {}",
+                        nom::error::convert_error(input, e)
+                    );
+                }
+            }
+        };
+    }
+
+    // Helper functions to build expressions.
+    mod h {
+        use crate::ast;
+
+        pub fn ilit(i: i64) -> ast::Literal {
+            ast::Literal::Int(i)
+        }
+        pub fn ilit_expr(i: i64) -> Box<ast::Expr> {
+            Box::new(ast::Expr::Literal(ilit(i)))
+        }
+
+        pub fn slit_expr(t: &str) -> Box<ast::Expr> {
+            Box::new(ast::Expr::Literal(ast::Literal::Str(String::from(t))))
+        }
+
+        pub fn var(s: &str) -> ast::Var {
+            ast::Var {
+                name: String::from(s),
+            }
+        }
+
+        pub fn var_expr(s: &str) -> Box<ast::Expr> {
+            Box::new(ast::Expr::Var(var(s)))
+        }
+
+        pub fn binexpr(a: Box<ast::Expr>, op: ast::BinOp, b: Box<ast::Expr>) -> Box<ast::Expr> {
+            Box::new(ast::Expr::BinExpr(a, op, b))
+        }
+
+        pub fn rec_expr(fields: Vec<(&str, Box<ast::Expr>)>) -> Box<ast::Expr> {
+            let mut fs = Vec::new();
+            for (f, e) in fields.into_iter() {
+                fs.push(ast::Field {
+                    name: ast::Var {
+                        name: String::from(f),
+                    },
+                    value: e,
+                });
+            }
+            Box::new(ast::Expr::Rec(ast::Rec {
+                let_vars: vec![],
+                fields: fs,
+            }))
+        }
     }
 
     #[test]
     fn i64_works() {
-        assert_eq!(
-            int_literal::<nom::error::Error<&str>>("123"),
-            Ok(("", ast::Literal::Int(123)))
-        );
-        assert_eq!(
-            int_literal::<nom::error::Error<&str>>("+123"),
-            Ok(("", ast::Literal::Int(123)))
-        );
-        assert_eq!(
-            int_literal::<nom::error::Error<&str>>("-123"),
-            Ok(("", ast::Literal::Int(-123)))
-        );
-    }
-
-    fn mk_var(s: &str) -> ast::Var {
-        ast::Var {
-            name: String::from(s),
-        }
-    }
-
-    fn mk_binop(a: Box<ast::Expr>, op: ast::BinOp, b: Box<ast::Expr>) -> Box<ast::Expr> {
-        Box::new(ast::Expr::BinExpr(a, op, b))
+        assert_finish!("123", int_literal, h::ilit(123));
+        assert_finish!("+1", int_literal, h::ilit(1));
+        assert_finish!("-2", int_literal, h::ilit(-2));
     }
 
     #[test]
     fn var_works() {
-        assert_eq!(var::<nom::error::Error<&str>>("y"), Ok(("", mk_var("y"))));
-        assert_eq!(var::<nom::error::Error<&str>>("_"), Ok(("", mk_var("_"))));
-        assert_eq!(var::<nom::error::Error<&str>>("_1"), Ok(("", mk_var("_1"))));
+        assert_eq!(var::<nom::error::Error<&str>>("y"), Ok(("", h::var("y"))));
+        assert_eq!(var::<nom::error::Error<&str>>("_"), Ok(("", h::var("_"))));
+        assert_eq!(var::<nom::error::Error<&str>>("_1"), Ok(("", h::var("_1"))));
         assert_eq!(
             var::<nom::error::Error<&str>>("foo_1.x"),
-            Ok((".x", mk_var("foo_1")))
+            Ok((".x", h::var("foo_1")))
         );
         assert!(var::<nom::error::Error<&str>>("1").is_err());
     }
 
     #[test]
     fn expr_works() {
-        let v = |x| Box::new(ast::Expr::Var(mk_var(x)));
-        let l = |i| Box::new(ast::Expr::Literal(ast::Literal::Int(i)));
-        let plus = ast::BinOp::Plus;
-        let times = ast::BinOp::Times;
-        let bin = |a, b, c| mk_binop(a, b, c);
-        match expr::<nom::error::Error<&str>>("x+y *3") {
-            Ok(("", e)) => {
-                assert_eq!(e, bin(v("x"), plus, bin(v("y"), times, l(3))));
-            }
-            err => {
-                panic!("{:?}", err)
-            }
-        }
-        match expr::<nom::error::Error<&str>>("(x + y ) *3") {
-            Ok(("", e)) => {
-                assert_eq!(e, bin(bin(v("x"), plus, v("y")), times, l(3)));
-            }
-            err => {
-                panic!("Could not parse: {:?}", err);
-            }
-        }
-    }
-
-    fn mk_rec(fields: Vec<(&str, Box<ast::Expr>)>) -> Box<ast::Expr> {
-        let mut fs = Vec::new();
-        for (f, e) in fields.into_iter() {
-            fs.push(ast::Field {
-                name: ast::Var {
-                    name: String::from(f),
-                },
-                value: e,
-            });
-        }
-        Box::new(ast::Expr::Rec(ast::Rec {
-            let_vars: vec![],
-            fields: fs,
-        }))
+        use ast::BinOp::{Plus, Times};
+        let v = h::var_expr;
+        let l = h::ilit_expr;
+        let bin = h::binexpr;
+        assert_finish!("x+y *3", expr, bin(v("x"), Plus, bin(v("y"), Times, l(3))));
+        assert_finish!(
+            "x * y + 3",
+            expr,
+            bin(bin(v("x"), Times, v("y")), Plus, l(3))
+        );
+        assert_finish!(
+            "(x + y ) *3",
+            expr,
+            bin(bin(v("x"), Plus, v("y")), Times, l(3))
+        );
+        // Right-associative expr parsing:
+        let right_assoc_add = bin(v("x"), Plus, bin(v("y"), Plus, v("z")));
+        assert_finish!("x+y+z", expr, right_assoc_add);
+        assert_finish!("x+(y+z)", expr, right_assoc_add);
     }
 
     #[test]
-    fn rec_empty() {
-        let l = |i| Box::new(ast::Expr::Literal(ast::Literal::Int(i)));
-        let input = r#"{
+    fn expr_long_chain() {
+        // Ensure our parser does not suffer from a combinatorial explosion
+        // when parsing long chains of expressions.
+        let args = vec!["a"; 1000];
+        assert_parse!(expr, &args.join("*")[..]);
+        assert_parse!(expr, &args.join("||")[..]);
+    }
+
+    #[test]
+    fn rec_works() {
+        let l = h::ilit_expr;
+        let s = h::slit_expr;
+        let r = h::rec_expr;
+        assert_finish!("{}", rec, r(vec![]));
+        assert_finish!("{}", rec, r(vec![]));
+        assert_finish!(
+            r#"{
             x: 7
             y: 10
-        }"#;
-        match rec::<VerboseError<&str>>(input).finish() {
-            Ok((rem, e)) => {
-                assert!(
-                    rem.is_empty(),
-                    "Expected to consume all output. Remainder: {}",
-                    rem
-                );
-                assert_eq!(e, mk_rec(vec![("x", l(7)),("y", l(10))]));
+        }"#,
+            rec,
+            r(vec![("x", l(7)), ("y", l(10))])
+        );
+        assert_finish!(
+            r#"{
+            x: {
+                y: {
+                    z: "foo"
+                }
             }
-            Err(e) => {
-                panic!("Could not parse: {}", convert_error(input, e));
-            }
-        }
+        }"#,
+            rec,
+            r(vec![("x", r(vec![("y", r(vec![("z", s("foo"))]))]))])
+        );
     }
 }

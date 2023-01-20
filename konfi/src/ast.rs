@@ -7,12 +7,20 @@ pub enum UnOp {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinOp {
-    Plus,       // +
-    Minus,      // -
-    Times,      // *
-    Div,        // /
-    LogicalAnd, // &&
-    LogicalOr,  // ||
+    Times,       // *
+    Div,         // /
+    Plus,        // +
+    Minus,       // -
+    ShiftLeft,   // <<
+    ShiftRight,  // >>
+    LessThan,    // <
+    GreaterThan, // >
+    LessEq,      // <=
+    GreaterEq,   // >=
+    Eq,          // ==
+    NotEq,       // !=
+    LogicalAnd,  // &&
+    LogicalOr,   // ||
 }
 
 #[derive(Debug, PartialEq)]
