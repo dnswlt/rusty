@@ -40,6 +40,7 @@ pub struct Var {
 pub enum Expr {
     Literal(Literal),
     Var(Var),
+    FieldAcc(Box<Expr>, String),
     UnExpr(UnOp, Box<Expr>),
     BinExpr(Box<Expr>, BinOp, Box<Expr>),
     Rec(Rec),

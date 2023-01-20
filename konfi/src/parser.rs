@@ -8,8 +8,8 @@ use nom::{
     character::complete::{char, multispace0, one_of},
     combinator::{cut, map, map_res, opt, recognize},
     error::{FromExternalError, ParseError},
-    multi::{many0, many1},
-    sequence::{delimited, pair, preceded, terminated, tuple},
+    multi::{many0, many1, separated_list0},
+    sequence::{delimited, pair, preceded, terminated},
     IResult,
 };
 
@@ -126,41 +126,20 @@ fn atom<'a, E>(input: &'a str) -> IResult<&str, Box<ast::Expr>, E>
 where
     E: ParseError<&'a str> + FromExternalError<&'a str, ParseIntError> + 'a,
 {
-    alt((
+    let (r1, e) = alt((
         rec,
         delimited(char('('), cut(ws(expr)), char(')')),
         map(parse_string, |s| {
             Box::new(ast::Expr::Literal(ast::Literal::Str(s)))
         }),
-        map(var, |v| Box::new(ast::Expr::Var(v))),
         map(int_literal, |l| Box::new(ast::Expr::Literal(l))),
-    ))(input)
-}
-
-fn factor<'a, E>(input: &'a str) -> IResult<&str, Box<ast::Expr>, E>
-where
-    E: ParseError<&'a str> + FromExternalError<&'a str, ParseIntError> + 'a,
-{
-    let mult_binop = |input| binop(BinopPrecedence::Multiplicative, input);
-    alt((
-        map(tuple((atom, ws(mult_binop), factor)), |(a, op, c)| {
-            Box::new(ast::Expr::BinExpr(a, op, c))
-        }),
-        atom,
-    ))(input)
-}
-
-fn expr2<'a, E>(input: &'a str) -> IResult<&str, Box<ast::Expr>, E>
-where
-    E: ParseError<&'a str> + FromExternalError<&'a str, ParseIntError> + 'a,
-{
-    let expr_binop = |input| binop(BinopPrecedence::Additive, input);
-    alt((
-        map(tuple((factor, ws(expr_binop), expr)), |(a, op, c)| {
-            Box::new(ast::Expr::BinExpr(a, op, c))
-        }),
-        factor,
-    ))(input)
+        map(var, |v| Box::new(ast::Expr::Var(v))),
+    ))(input)?;
+    // Try to parse a field access suffix.
+    match pair(ws(char::<&'a str, E>('.')), var)(r1) {
+        Ok((r2, (_, v))) => Ok((r2, Box::new(ast::Expr::FieldAcc(e, v.name)))),
+        _ => Ok((r1, e)),
+    }
 }
 
 pub fn expr<'a, E>(input: &'a str) -> IResult<&str, Box<ast::Expr>, E>
@@ -212,7 +191,8 @@ where
     map(
         delimited(
             terminated(char('{'), multispace0),
-            many0(delimited(multispace0, rec_field, eol)), //
+            // many0(delimited(multispace0, rec_field, eol)), //
+            separated_list0(eol, preceded(multispace0, rec_field)),
             preceded(multispace0, char('}')),
         ),
         |fs| {
@@ -228,22 +208,18 @@ where
 mod tests {
 
     use super::*;
+    use nom::combinator::all_consuming;
     use nom::Finish;
 
     macro_rules! assert_parse {
         ($f:ident, $e:expr) => {
             let input = $e;
-            match $f::<nom::error::VerboseError<&str>>(input).finish() {
-                Ok((i, _)) => {
-                    assert_eq!(i, "", "Input not fully processed.");
-                }
-                Err(e) => {
-                    assert!(
-                        false,
-                        "Could not parse: {}",
-                        nom::error::convert_error(input, e)
-                    );
-                }
+            if let Err(e) = all_consuming($f::<nom::error::VerboseError<&str>>)(input).finish() {
+                assert!(
+                    false,
+                    "Could not parse: {}",
+                    nom::error::convert_error(input, e)
+                );
             }
         };
     }
@@ -310,6 +286,10 @@ mod tests {
                 fields: fs,
             }))
         }
+
+        pub fn acc_expr(e: Box<ast::Expr>, f: &str) -> Box<ast::Expr> {
+            Box::new(ast::Expr::FieldAcc(e, String::from(f)))
+        }
     }
 
     #[test]
@@ -361,6 +341,15 @@ mod tests {
         let args = vec!["a"; 1000];
         assert_parse!(expr, &args.join("*")[..]);
         assert_parse!(expr, &args.join("||")[..]);
+        assert_parse!(expr, &args.join(">>")[..]);
+    }
+
+    #[test]
+    fn expr_rec_field_access() {
+        let l = h::ilit_expr;
+        let r = h::rec_expr;
+        let get = h::acc_expr;
+        assert_finish!("{x: 7}.x", expr, get(r(vec![("x", l(7))]), "x"));
     }
 
     #[test]
