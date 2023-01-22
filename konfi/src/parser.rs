@@ -136,8 +136,14 @@ where
         map(var, |v| Box::new(ast::Expr::Var(v))),
     ))(input)?;
     // Try to parse a field access suffix.
-    match pair(ws(char::<&'a str, E>('.')), var)(r1) {
-        Ok((r2, (_, v))) => Ok((r2, Box::new(ast::Expr::FieldAcc(e, v.name)))),
+    match many0(preceded(ws(char::<&'a str, E>('.')), var))(r1) {
+        Ok((r2, fs)) => {
+            let mut d = e;
+            for f in fs.into_iter() {
+                d = Box::new(ast::Expr::FieldAcc(d, f.name));
+            }
+            Ok((r2, d))
+        }
         _ => Ok((r1, e)),
     }
 }
@@ -202,6 +208,19 @@ where
             }))
         },
     )(input)
+}
+
+pub fn expr_opt(s: &str) -> Option<Box<ast::Expr>> {
+    match expr::<nom::error::VerboseError<&str>>(s) {
+        Ok((i, e)) => {
+            if i.is_empty() {
+                Some(e)
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -350,6 +369,11 @@ mod tests {
         let r = h::rec_expr;
         let get = h::acc_expr;
         assert_finish!("{x: 7}.x", expr, get(r(vec![("x", l(7))]), "x"));
+        assert_finish!(
+            "{x: {y: 7}}.x.y",
+            expr,
+            get(get(r(vec![("x", r(vec![("y", l(7))]))]), "x"), "y")
+        );
     }
 
     #[test]
