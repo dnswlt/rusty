@@ -4,11 +4,12 @@ use crate::ast;
 use chrono::Duration;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::rc::Rc;
 
 type UtcTimestamp = chrono::offset::Utc;
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub enum Val {
     Nil,
     Rec(Rc<RefCell<Rec>>),
@@ -35,9 +36,24 @@ impl Val {
     }
 }
 
+impl Display for Val {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Val::Nil => write!(f, "nil"),
+            Val::Rec(_) => todo!(),
+            Val::Bool(b) => write!(f, "{b}"),
+            Val::Int(i) => write!(f, "{i}"),
+            Val::Double(d) => write!(f, "{d}"),
+            Val::Str(s) => write!(f, "\"{s}\""),
+            Val::Timestamp(_) => todo!(),
+            Val::Duration(_) => todo!(),
+        }
+    }
+}
+
 #[derive(PartialEq, Debug)]
 pub struct Rec {
-    fields: HashMap<String, Rc<Val>>,
+    fields: HashMap<String, Val>,
 }
 
 impl Rec {
@@ -46,13 +62,10 @@ impl Rec {
             fields: HashMap::new(),
         }
     }
-    pub fn getattr(&self, f: &str) -> Option<&Rc<Val>> {
-        self.fields.get(f)
+    pub fn getattr(&self, f: &str) -> Option<Val> {
+        self.fields.get(f).map(|v| v.clone())
     }
-    pub fn getattrv(&self, f: &str) -> Option<Rc<Val>> {
-        self.fields.get(f).map(|r| r.clone())
-    }
-    pub fn setattr(&mut self, f: &str, val: Rc<Val>) {
+    pub fn setattr(&mut self, f: &str, val: Val) {
         self.fields.insert(f.to_string(), val);
     }
 }
@@ -92,11 +105,11 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    pub fn getval(&self, var: &str) -> Option<Rc<Val>> {
+    pub fn getval(&self, var: &str) -> Option<Val> {
         let mut c = self;
         loop {
             if let Some(v) = self.rec.borrow().getattr(var) {
-                return Some(Rc::clone(v));
+                return Some(v);
             }
             if let Some(p) = &c.parent {
                 c = p;
@@ -114,24 +127,24 @@ impl<'a> Ctx<'a> {
             .find(|&fld| fld.name.name == field);
     }
 
-    pub fn for_field(ctx: Rc<Ctx<'a>>, field: &str) -> Option<(Rc<Ctx<'a>>, &'a ast::Field)> {
+    pub fn for_var(ctx: Rc<Ctx<'a>>, field: &str) -> Option<(Rc<Ctx<'a>>, &'a ast::Field)> {
         if let Some(f) = ctx.getfield(field) {
             return Some((ctx, f));
         }
         match &ctx.parent {
-            Some(p) => Self::for_field(Rc::clone(p), field),
-            None => None
+            Some(p) => Self::for_var(Rc::clone(p), field),
+            None => None,
         }
     }
 }
 
 macro_rules! numeric_binexpr {
     ($lv:expr, $op:tt, $rv:expr) => {
-        match (&*$lv, &*$rv) {
-            (Val::Int(a), Val::Int(b)) => Ok(Rc::new(Val::Int(a $op b))),
-            (Val::Int(a), Val::Double(b)) => Ok(Rc::new(Val::Double(*a as f64 $op b))),
-            (Val::Double(a), Val::Int(b)) => Ok(Rc::new(Val::Double(a $op *b as f64))),
-            (Val::Double(a), Val::Double(b)) => Ok(Rc::new(Val::Double(a $op b))),
+        match (&$lv, &$rv) {
+            (Val::Int(a), Val::Int(b)) => Ok(Val::Int(a $op b)),
+            (Val::Int(a), Val::Double(b)) => Ok(Val::Double((*a as f64) $op b)),
+            (Val::Double(a), Val::Int(b)) => Ok(Val::Double(a $op (*b as f64))),
+            (Val::Double(a), Val::Double(b)) => Ok(Val::Double(a $op b)),
             (_, _) => Err(EvalError {
                 message: format!("Invalid types for arithmetic operation '{}': {} and {}",
                     stringify!($op), $lv.typ(), $rv.typ()),
@@ -140,30 +153,52 @@ macro_rules! numeric_binexpr {
     };
 }
 
-pub fn eval(e: &ast::Expr, ctx: Rc<Ctx>) -> EvalResult<Rc<Val>> {
-    let ok = |v| Ok(Rc::new(v));
+macro_rules! comp_expr {
+    ($lv:expr, $op:tt, $rv:expr) => {
+        match (&$lv, &$rv) {
+            (Val::Int(a), Val::Int(b)) => Ok(Val::Bool(*a $op *b)),
+            (Val::Int(a), Val::Double(b)) => Ok(Val::Bool((*a as f64) $op *b)),
+            (Val::Double(a), Val::Int(b)) => Ok(Val::Bool(*a $op (*b as f64))),
+            (Val::Double(a), Val::Double(b)) => Ok(Val::Bool(*a $op *b)),
+            (Val::Str(a), Val::Str(b)) => Ok(Val::Bool(a $op b)),
+            (Val::Bool(a), Val::Bool(b)) => Ok(Val::Bool(*a $op *b)),
+            (_, _) => Err(EvalError {
+                message: format!("Invalid types for arithmetic operation '{}': {} and {}",
+                    stringify!($op), $lv.typ(), $rv.typ()),
+            }),
+        }
+    };
+}
+
+fn eval_field(field: &ast::Field, ctx: Rc<Ctx>) -> EvalResult<Val> {
+    let val = eval(&field.value, Rc::clone(&ctx))?;
+    let mut m = (*ctx.rec).borrow_mut();
+    m.setattr(&field.name.name, val.clone());
+    Ok(val)
+}
+
+pub fn eval(e: &ast::Expr, ctx: Rc<Ctx>) -> EvalResult<Val> {
     match e {
         ast::Expr::Literal(i) => match i {
-            ast::Literal::Nil => ok(Val::Nil),
-            ast::Literal::Int(i) => ok(Val::Int(*i)),
-            ast::Literal::Double(d) => ok(Val::Double(*d)),
-            ast::Literal::Str(s) => ok(Val::Str(s.clone())),
+            ast::Literal::Nil => Ok(Val::Nil),
+            ast::Literal::Int(i) => Ok(Val::Int(*i)),
+            ast::Literal::Double(d) => Ok(Val::Double(*d)),
+            ast::Literal::Str(s) => Ok(Val::Str(s.clone())),
         },
         ast::Expr::Var(v) => match ctx.getval(&v.name) {
             Some(r) => Ok(r),
-            None => {
-                match Ctx::for_field(ctx, &v.name) {
-                    Some((ctx2, fld)) => {
-                        eval(&fld.value, ctx2)
-                    }
-                    None => Err(EvalError {
-                        message: format!("Unbound variable '{}'", v.name),
-                    })
+            None => match Ctx::for_var(ctx, &v.name) {
+                Some((ctx2, fld)) => {
+                    // Evaluate `fld`, store its value, and return it.
+                    eval_field(fld, Rc::clone(&ctx2))
                 }
-            }
+                None => Err(EvalError {
+                    message: format!("Unbound variable '{}'", v.name),
+                }),
+            },
         },
-        ast::Expr::FieldAcc(re, f) => match &*eval(re, ctx)? {
-            Val::Rec(r) => r.borrow().getattrv(f).ok_or_else(|| EvalError {
+        ast::Expr::FieldAcc(re, f) => match eval(re, ctx)? {
+            Val::Rec(r) => r.borrow().getattr(f).ok_or_else(|| EvalError {
                 message: format!("Field does not exist '{}'", f),
             }),
             v => Err(EvalError {
@@ -182,19 +217,19 @@ pub fn eval(e: &ast::Expr, ctx: Rc<Ctx>) -> EvalResult<Rc<Val>> {
                 ast::BinOp::Minus => numeric_binexpr!(lv, -, rv),
                 ast::BinOp::ShiftLeft => todo!(),
                 ast::BinOp::ShiftRight => todo!(),
-                ast::BinOp::LessThan => todo!(),
-                ast::BinOp::GreaterThan => todo!(),
-                ast::BinOp::LessEq => todo!(),
-                ast::BinOp::GreaterEq => todo!(),
-                ast::BinOp::Eq => todo!(),
-                ast::BinOp::NotEq => todo!(),
+                ast::BinOp::LessThan => comp_expr!(lv, <, rv),
+                ast::BinOp::GreaterThan => comp_expr!(lv, >, rv),
+                ast::BinOp::LessEq => comp_expr!(lv, <=, rv),
+                ast::BinOp::GreaterEq => comp_expr!(lv, >=, rv),
+                ast::BinOp::Eq => comp_expr!(lv, ==, rv),
+                ast::BinOp::NotEq => comp_expr!(lv, !=, rv),
                 ast::BinOp::LogicalAnd => todo!(),
                 ast::BinOp::LogicalOr => todo!(),
             }
         }
         ast::Expr::Rec(re) => {
             let r = eval_rec(re, ctx)?;
-            ok(Val::Rec(r))
+            Ok(Val::Rec(r))
         }
         ast::Expr::Call(_) => todo!(),
         ast::Expr::Fun(_) => todo!(),
@@ -207,6 +242,11 @@ fn eval_rec(re: &ast::Rec, ctx: Rc<Ctx>) -> EvalResult<Rc<RefCell<Rec>>> {
         let rec_ctx = Ctx::child_of(ctx, Rc::clone(&record), re);
         {
             for fld in re.fields.iter() {
+                if record.borrow().fields.contains_key(&fld.name.name) {
+                    // We already set this field while evaluating other fields
+                    // of this (or a child/parent/sibling) record.
+                    continue;
+                }
                 let v = eval(&fld.value, Rc::clone(&rec_ctx))?;
                 (*record).borrow_mut().setattr(&fld.name.name, v);
             }
@@ -224,7 +264,7 @@ mod tests {
     fn eval_rec() {
         let rec = parser::expr_opt("{x: 3 - 8}.x").unwrap();
         let ctx = Ctx::global();
-        assert_eq!(eval(&rec, ctx), Ok(Rc::new(Val::Int(-5))));
+        assert_eq!(eval(&rec, ctx), Ok(Val::Int(-5)));
     }
     #[test]
     fn eval_rec_lookup() {
@@ -239,6 +279,23 @@ mod tests {
         )
         .unwrap();
         let ctx = Ctx::global();
-        assert_eq!(eval(&rec, ctx), Ok(Rc::new(Val::Int(2))));
+        assert_eq!(eval(&rec, ctx), Ok(Val::Int(2)));
+    }
+
+    #[test]
+    fn eval_rec_linear_dep() {
+        let rec = parser::expr_opt(
+            r#"{
+            a: b.value
+            b: c
+            c: d
+            d: e
+            e: f
+            f: {value: 1}
+        }.a"#,
+        )
+        .unwrap();
+        let ctx = Ctx::global();
+        assert_eq!(eval(&rec, ctx), Ok(Val::Int(1)));
     }
 }
