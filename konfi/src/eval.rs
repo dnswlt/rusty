@@ -34,6 +34,19 @@ impl Val {
             Val::Bool(_) => "bool",
         }
     }
+
+    pub fn to_bool(&self) -> bool {
+        match self {
+            Val::Nil => false,
+            Val::Rec(r) => !r.borrow().is_empty(),
+            Val::Bool(b) => *b,
+            Val::Int(i) => *i != 0,
+            Val::Double(d) => *d != 0.0,
+            Val::Str(s) => !s.is_empty(),
+            Val::Timestamp(_) => todo!(),
+            Val::Duration(_) => todo!(),
+        }
+    }
 }
 
 impl Display for Val {
@@ -53,7 +66,7 @@ impl Display for Val {
 
 #[derive(PartialEq, Debug)]
 pub struct Rec {
-    fields: HashMap<String, Val>,
+    pub fields: HashMap<String, Val>,
 }
 
 impl Rec {
@@ -67,6 +80,9 @@ impl Rec {
     }
     pub fn setattr(&mut self, f: &str, val: Val) {
         self.fields.insert(f.to_string(), val);
+    }
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
     }
 }
 
@@ -120,11 +136,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn getfield(&self, field: &str) -> Option<&'a ast::Field> {
-        return self
-            .rec_expr
-            .fields
-            .iter()
-            .find(|&fld| fld.name.name == field);
+        return self.rec_expr.fields.iter().find(|&fld| fld.name == field);
     }
 
     pub fn for_var(ctx: Rc<Ctx<'a>>, field: &str) -> Option<(Rc<Ctx<'a>>, &'a ast::Field)> {
@@ -170,13 +182,6 @@ macro_rules! comp_expr {
     };
 }
 
-fn eval_field(field: &ast::Field, ctx: Rc<Ctx>) -> EvalResult<Val> {
-    let val = eval(&field.value, Rc::clone(&ctx))?;
-    let mut m = (*ctx.rec).borrow_mut();
-    m.setattr(&field.name.name, val.clone());
-    Ok(val)
-}
-
 pub fn eval(e: &ast::Expr, ctx: Rc<Ctx>) -> EvalResult<Val> {
     match e {
         ast::Expr::Literal(i) => match i {
@@ -205,7 +210,20 @@ pub fn eval(e: &ast::Expr, ctx: Rc<Ctx>) -> EvalResult<Val> {
                 message: format!("Invalid field access on value type '{}'", v.typ()),
             }),
         },
-        ast::Expr::UnExpr(_, _) => todo!(),
+        ast::Expr::UnExpr(op, e) => {
+            let val = eval(e, Rc::clone(&ctx))?;
+            match op {
+                ast::UnOp::UnPlus => Ok(val),
+                ast::UnOp::UnMinus => match &val {
+                    Val::Int(i) => Ok(Val::Int(-i)),
+                    Val::Double(d) => Ok(Val::Double(-d)),
+                    _ => Err(EvalError {
+                        message: format!("Cannot apply unary minus to type '{}'", val.typ()),
+                    }),
+                },
+                ast::UnOp::Not => Ok(Val::Bool(!val.to_bool())),
+            }
+        }
         ast::Expr::BinExpr(le, op, re) => {
             let lv = eval(le, Rc::clone(&ctx))?;
             // Let's make && || lazy later. For now all ops are eager.
@@ -223,8 +241,8 @@ pub fn eval(e: &ast::Expr, ctx: Rc<Ctx>) -> EvalResult<Val> {
                 ast::BinOp::GreaterEq => comp_expr!(lv, >=, rv),
                 ast::BinOp::Eq => comp_expr!(lv, ==, rv),
                 ast::BinOp::NotEq => comp_expr!(lv, !=, rv),
-                ast::BinOp::LogicalAnd => todo!(),
-                ast::BinOp::LogicalOr => todo!(),
+                ast::BinOp::LogicalAnd => Ok(Val::Bool(lv.to_bool() && rv.to_bool())),
+                ast::BinOp::LogicalOr => Ok(Val::Bool(lv.to_bool() || rv.to_bool())),
             }
         }
         ast::Expr::Rec(re) => {
@@ -242,17 +260,25 @@ fn eval_rec(re: &ast::Rec, ctx: Rc<Ctx>) -> EvalResult<Rc<RefCell<Rec>>> {
         let rec_ctx = Ctx::child_of(ctx, Rc::clone(&record), re);
         {
             for fld in re.fields.iter() {
-                if record.borrow().fields.contains_key(&fld.name.name) {
+                if record.borrow().fields.contains_key(&fld.name) {
                     // We already set this field while evaluating other fields
                     // of this (or a child/parent/sibling) record.
                     continue;
                 }
                 let v = eval(&fld.value, Rc::clone(&rec_ctx))?;
-                (*record).borrow_mut().setattr(&fld.name.name, v);
+                (*record).borrow_mut().setattr(&fld.name, v);
             }
         }
         Ok(record)
     }
+}
+
+// Evaluate a single field, storing the result in the context's active record.
+fn eval_field(field: &ast::Field, ctx: Rc<Ctx>) -> EvalResult<Val> {
+    let val = eval(&field.value, Rc::clone(&ctx))?;
+    let mut m = (*ctx.rec).borrow_mut();
+    m.setattr(&field.name, val.clone());
+    Ok(val)
 }
 
 #[cfg(test)]
@@ -260,12 +286,45 @@ mod tests {
     use super::*;
     use crate::parser;
 
+    mod h {
+        use crate::eval::*;
+        use crate::parser;
+        use crate::ast;
+        pub fn force_parse(s: &str) -> Box<ast::Expr> {
+            parser::expr_opt(s).expect(&format!("Expected being able to parse: {}", s))
+        }
+        pub fn eval_global(s: &str) -> EvalResult<Val> {
+            eval(&force_parse(s), Ctx::global())
+        }
+    }
+
+    #[test]
+    fn eval_truthy() {
+        let e = h::eval_global;
+        let r = |b| Ok(Val::Bool(b));
+        assert_eq!(e("!!7"), r(true));
+        assert_eq!(e("!\"foo\""), r(false));
+        assert_eq!(e("!!{}"), r(false));
+        assert_eq!(e("!!{}"), r(false));
+    }
+
+    #[test]
+    fn eval_comp() {
+        let e = h::eval_global;
+        let r = |b| Ok(Val::Bool(b));
+        assert_eq!(e("1 == 2"), r(false));
+        assert_eq!(e("1 != 2"), r(true));
+        assert_eq!(e("1 < 2 && 2 < 3"), r(true));
+        // Tests that && binds more tightly than ||
+        assert_eq!(e("1 || 1 && 0"), r(true));
+        assert_eq!(e("1 || 0 && 0"), r(true));
+    }
+
     #[test]
     fn eval_rec() {
-        let rec = parser::expr_opt("{x: 3 - 8}.x").unwrap();
-        let ctx = Ctx::global();
-        assert_eq!(eval(&rec, ctx), Ok(Val::Int(-5)));
+        assert_eq!(h::eval_global("{x: 3 - 8}.x"), Ok(Val::Int(-5)));
     }
+
     #[test]
     fn eval_rec_lookup() {
         let rec = parser::expr_opt(

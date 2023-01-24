@@ -5,12 +5,12 @@ use std::num::ParseIntError;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while, take_while1},
-    character::complete::{char, multispace0, one_of},
-    combinator::{cut, map, map_res, opt, recognize},
+    character::complete::{char, multispace0, multispace1, one_of},
+    combinator::{all_consuming, cut, map, map_res, opt, recognize},
     error::{FromExternalError, ParseError},
     multi::{many0, many1, separated_list0},
-    sequence::{delimited, pair, preceded, terminated},
-    IResult,
+    sequence::{delimited, pair, preceded, terminated, tuple},
+    Finish, IResult,
 };
 
 /// A combinator that takes a parser `inner` and produces a parser that also consumes both leading and
@@ -45,7 +45,7 @@ where
     )(input)
 }
 
-fn var<'a, E>(input: &'a str) -> IResult<&str, ast::Var, E>
+fn ident<'a, E>(input: &'a str) -> IResult<&str, String, E>
 where
     E: ParseError<&'a str>,
 {
@@ -54,10 +54,15 @@ where
             take_while1(|c: char| c.is_alphabetic() || c == '_'),
             take_while(|c: char| c.is_alphanumeric() || c == '_'),
         )),
-        |v: &str| ast::Var {
-            name: String::from(v),
-        },
+        |v: &str| String::from(v),
     )(input)
+}
+
+fn var<'a, E>(input: &'a str) -> IResult<&str, ast::Var, E>
+where
+    E: ParseError<&'a str>,
+{
+    map(ident, |v| ast::Var { name: v })(input)
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -88,6 +93,17 @@ impl BinopPrecedence {
             }
         }
     }
+}
+
+fn unop<'a, E>(input: &'a str) -> IResult<&str, ast::UnOp, E>
+where
+    E: ParseError<&'a str>,
+{
+    alt((
+        map(tag("-"), |_| ast::UnOp::UnMinus),
+        map(tag("+"), |_| ast::UnOp::UnPlus),
+        map(tag("!"), |_| ast::UnOp::Not),
+    ))(input)
 }
 
 fn binop<'a, E>(lvl: BinopPrecedence, input: &'a str) -> IResult<&str, ast::BinOp, E>
@@ -133,6 +149,9 @@ where
             Box::new(ast::Expr::Literal(ast::Literal::Str(s)))
         }),
         map(int_literal, |l| Box::new(ast::Expr::Literal(l))),
+        map(pair(ws(unop), atom), |(op, e)| {
+            Box::new(ast::Expr::UnExpr(op, e))
+        }),
         map(var, |v| Box::new(ast::Expr::Var(v))),
     ))(input)?;
     // Try to parse a field access suffix.
@@ -181,11 +200,21 @@ where
     }
 }
 
+fn let_binding<'a, E>(input: &'a str) -> IResult<&str, ast::LetBinding, E>
+where
+    E: ParseError<&'a str> + FromExternalError<&'a str, ParseIntError> + 'a,
+{
+    map(
+        tuple((tag("let"), multispace1, var, ws(char('=')), expr)),
+        |(_, _, v, _, e)| ast::LetBinding { var: v, value: e },
+    )(input)
+}
+
 fn rec_field<'a, E>(input: &'a str) -> IResult<&str, ast::Field, E>
 where
     E: ParseError<&'a str> + FromExternalError<&'a str, ParseIntError> + 'a,
 {
-    map(pair(terminated(var, ws(char(':'))), expr), |(v, e)| {
+    map(pair(terminated(ident, ws(char(':'))), expr), |(v, e)| {
         ast::Field { name: v, value: e }
     })(input)
 }
@@ -210,8 +239,8 @@ where
     )(input)
 }
 
-pub fn expr_opt(s: &str) -> Option<Box<ast::Expr>> {
-    match expr::<nom::error::VerboseError<&str>>(s) {
+pub fn expr_opt(input: &str) -> Option<Box<ast::Expr>> {
+    match expr::<nom::error::VerboseError<&str>>(input) {
         Ok((i, e)) => {
             if i.is_empty() {
                 Some(e)
@@ -220,6 +249,36 @@ pub fn expr_opt(s: &str) -> Option<Box<ast::Expr>> {
             }
         }
         Err(_) => None,
+    }
+}
+
+pub fn module<'a, E>(input: &'a str) -> IResult<&str, ast::Module, E>
+where
+    E: ParseError<&'a str> + FromExternalError<&'a str, ParseIntError> + 'a,
+{
+    let (input1, let_vars) =
+        preceded(multispace0, many0(delimited(multispace0, let_binding, eol)))(input)?;
+    // In contrast to all other grammar rules, the module eats any trailing whitespace.
+    let (input2, e) = delimited(multispace0, expr, multispace0)(input1)?;
+    Ok((
+        input2,
+        ast::Module {
+            let_vars: let_vars,
+            expr: e,
+        },
+    ))
+}
+
+pub struct KonfiParseError {
+    pub message: String,
+}
+
+pub fn parse_module(input: &str) -> Result<ast::Module, KonfiParseError> {
+    match all_consuming(module::<nom::error::VerboseError<&str>>)(input).finish() {
+        Ok((_, m)) => Ok(m),
+        Err(e) => Err(KonfiParseError {
+            message: nom::error::convert_error(input, e),
+        }),
     }
 }
 
@@ -263,7 +322,7 @@ mod tests {
 
     // Helper functions to build expressions.
     mod h {
-        use crate::ast;
+        use crate::ast::{self, LetBinding};
 
         pub fn ilit(i: i64) -> ast::Literal {
             ast::Literal::Int(i)
@@ -286,6 +345,10 @@ mod tests {
             Box::new(ast::Expr::Var(var(s)))
         }
 
+        pub fn unexpr(op: ast::UnOp, e: Box<ast::Expr>) -> Box<ast::Expr> {
+            Box::new(ast::Expr::UnExpr(op, e))
+        }
+
         pub fn binexpr(a: Box<ast::Expr>, op: ast::BinOp, b: Box<ast::Expr>) -> Box<ast::Expr> {
             Box::new(ast::Expr::BinExpr(a, op, b))
         }
@@ -294,9 +357,7 @@ mod tests {
             let mut fs = Vec::new();
             for (f, e) in fields.into_iter() {
                 fs.push(ast::Field {
-                    name: ast::Var {
-                        name: String::from(f),
-                    },
+                    name: f.to_string(),
                     value: e,
                 });
             }
@@ -308,6 +369,15 @@ mod tests {
 
         pub fn acc_expr(e: Box<ast::Expr>, f: &str) -> Box<ast::Expr> {
             Box::new(ast::Expr::FieldAcc(e, String::from(f)))
+        }
+
+        pub fn letvar(x: &str, e: Box<ast::Expr>) -> ast::LetBinding {
+            LetBinding {
+                var: ast::Var {
+                    name: x.to_string(),
+                },
+                value: e,
+            }
         }
     }
 
@@ -333,9 +403,11 @@ mod tests {
     #[test]
     fn expr_works() {
         use ast::BinOp::{Plus, Times};
+        use ast::UnOp::{Not, UnMinus};
         let v = h::var_expr;
         let l = h::ilit_expr;
         let bin = h::binexpr;
+        let un = h::unexpr;
         assert_finish!("x+y *3", expr, bin(v("x"), Plus, bin(v("y"), Times, l(3))));
         assert_finish!(
             "x * y + 3",
@@ -351,6 +423,8 @@ mod tests {
         let right_assoc_add = bin(v("x"), Plus, bin(v("y"), Plus, v("z")));
         assert_finish!("x+y+z", expr, right_assoc_add);
         assert_finish!("x+(y+z)", expr, right_assoc_add);
+        assert_finish!("! !x", expr, un(Not, un(Not, v("x"))));
+        assert_finish!("x + - y", expr, bin(v("x"), Plus, un(UnMinus, v("y"))));
     }
 
     #[test]
@@ -401,6 +475,44 @@ mod tests {
         }"#,
             rec,
             r(vec![("x", r(vec![("y", r(vec![("z", s("foo"))]))]))])
+        );
+    }
+
+    #[test]
+    fn let_binding_works() {
+        assert_finish!(
+            "let x = 7",
+            let_binding,
+            ast::LetBinding {
+                var: ast::Var {
+                    name: "x".to_string(),
+                },
+                value: h::ilit_expr(7),
+            }
+        );
+    }
+
+    #[test]
+    fn module_works() {
+        let r = h::rec_expr;
+        assert_finish!(
+            r#"
+        let x = 1
+
+        let y = 2
+
+        {
+            a: 1
+        }
+        "#,
+            module,
+            ast::Module {
+                let_vars: vec![
+                    h::letvar("x", h::ilit_expr(1)),
+                    h::letvar("y", h::ilit_expr(2)),
+                ],
+                expr: r(vec![("a", h::ilit_expr(1))]),
+            }
         );
     }
 }

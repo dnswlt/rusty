@@ -68,12 +68,18 @@ pub struct Rec {
 
 #[derive(Debug, PartialEq)]
 pub struct Field {
-    pub name: Var,
+    pub name: String,
     pub value: Box<Expr>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct LetBinding {
-    var: Var,
-    value: Expr,
+    pub var: Var,
+    pub value: Box<Expr>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Module {
+    pub let_vars: Vec<LetBinding>,
+    pub expr: Box<Expr>,
 }
