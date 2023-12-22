@@ -1,4 +1,22 @@
-# Cross-compile for Raspberry 2
+# Multicast -- discover machines on a local network
+
+A (very!) simple tool that you can run in the background on your machines
+that are connected to the same local area network and which lets you
+discover the other machines, their IP addresses and some status information.
+
+## Install
+
+You need the Rust build tools (`cargo`) to build.
+
+```bash
+cargo build --release
+# Test: should print the version:
+target/release/multicast --version
+# Install
+sudo cp target/release/multicast /usr/local/bin
+```
+
+## Cross-compile for Raspberry 2
 
 ```shell
 rustup target add armv7-unknown-linux-gnueabihf
